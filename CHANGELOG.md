@@ -4,6 +4,11 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.2 - 2026-11-15
+
+### Changed
+- No change in this package: the SDK packages share one version, and 1.0.2 fixes the Unreal plugins.
+
 ## 1.0.1 - 2026-11-15
 
 ### Fixed
