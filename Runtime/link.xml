@@ -1,0 +1,6 @@
+<!-- Keep the SDK whole under managed code stripping: its JSON types are made by reflection (Json.NET) and
+     KrtuworksRunner.OnAuthSession is reached only by name, from the iOS plugin's UnitySendMessage. -->
+<linker>
+  <assembly fullname="Krtuworks.Sdk" preserve="all" />
+  <assembly fullname="Krtuworks.Sdk.Steamworks" preserve="all" ignoreIfMissing="1" />
+</linker>

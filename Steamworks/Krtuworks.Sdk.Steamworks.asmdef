@@ -1,0 +1,16 @@
+{
+  "name": "Krtuworks.Sdk.Steamworks",
+  "rootNamespace": "Krtuworks.Steamworks",
+  "references": ["Krtuworks.Sdk", "com.rlabrecque.steamworks.net"],
+  "includePlatforms": ["Editor", "LinuxStandalone64", "macOSStandalone", "WindowsStandalone32", "WindowsStandalone64"],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": ["KRTU_STEAMWORKS"],
+  "versionDefines": [
+    { "name": "com.rlabrecque.steamworks.net", "expression": "20.0.0", "define": "KRTU_STEAMWORKS" }
+  ],
+  "noEngineReferences": false
+}

@@ -1,0 +1,19 @@
+{
+  "name": "com.krtuworks.sdk",
+  "version": "1.0.0",
+  "displayName": "Krtuworks SDK",
+  "description": "Krtuworks ID sign-in and guests, sessions, events, progress, cloud files and remote config for Unity games and apps.",
+  "unity": "2022.3",
+  "license": "Apache-2.0",
+  "documentationUrl": "https://partner.krtuworks.com/docs",
+  "changelogUrl": "https://github.com/krtuworks/krtuworks-sdk-unity/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/krtuworks/krtuworks-sdk-unity/blob/main/LICENSE",
+  "author": {
+    "name": "Krtuworks LLC",
+    "url": "https://krtuworks.com"
+  },
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  },
+  "keywords": ["krtuworks", "auth", "analytics", "cloud save"]
+}
