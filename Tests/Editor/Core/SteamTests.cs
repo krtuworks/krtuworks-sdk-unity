@@ -325,10 +325,11 @@ namespace Krtuworks.Tests
             var cloud = new SteamAchievementSync(steam);
             Assert.That(cloud.CloudEnabled(), Is.True);
             var file = await cloud.ReadFileAsync("krtuworks-save-1.bin");
-            Assert.That((file!.Data, file.WrittenAt), Is.EqualTo((new byte[] { 1, 2, 3 }, 1_700_000_000L)));
+            Assert.That(file!.Data, Is.EqualTo(new byte[] { 1, 2, 3 }));
+            Assert.That(file.WrittenAt, Is.EqualTo(1_700_000_000L));
             Assert.That(await cloud.ReadFileAsync("krtuworks-none.bin"), Is.Null, "control: no file is null");
             steam.Unreadable.Add("krtuworks-save-1.bin");
-            var err = Assert.ThrowsAsync<KrtuworksException>(() => cloud.ReadFileAsync("krtuworks-save-1.bin"));
+            var err = await AsyncAssert.ThrowsAsync<KrtuworksException>(() => cloud.ReadFileAsync("krtuworks-save-1.bin"));
             Assert.That((err!.Code, err.Retryable), Is.EqualTo(("platform_read_failed", true)), "a file Steam lists but cannot read is never taken as absent (another PC's newer save would be written over)");
             Assert.That(await cloud.WriteFileAsync("krtuworks-save-2.bin", new byte[] { 9 }), Is.True);
             Assert.That(await cloud.AvailableBytesAsync(), Is.EqualTo(1_000_000));

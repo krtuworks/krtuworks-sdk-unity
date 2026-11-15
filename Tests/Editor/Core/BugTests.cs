@@ -215,7 +215,7 @@ namespace Krtuworks.Tests
         {
             var off = new FakeServer();
             var k1 = await Started(off, config: new JObject { ["modules"] = new JObject { ["bugReports"] = false } });
-            var e = Assert.ThrowsAsync<KrtuworksException>(() => k1.ReportBugAsync(new BugReportInput { Category = "OTHER", Description = "x" }))!;
+            var e = await AsyncAssert.ThrowsAsync<KrtuworksException>(() => k1.ReportBugAsync(new BugReportInput { Category = "OTHER", Description = "x" }));
             Assert.That(e.Code, Is.EqualTo("module_disabled"));
             Assert.That((await k1.WaitingAsync()).BugReports, Is.EqualTo(0));
             await k1.ShutdownAsync();
@@ -293,7 +293,7 @@ namespace Krtuworks.Tests
             Assert.That(JToken.DeepEquals(seen[1], new JObject { ["reason"] = "SPAM" }), Is.True, seen[1].ToString());
             foreach (var (subject, reason, note) in new[] { ("", "SPAM", (string?)null), ("pw_other_player", "RUDE", null), ("pw_other_player", "HATE", new string('x', 301)) })
             {
-                var e = Assert.ThrowsAsync<KrtuworksException>(() => krtu.ReportAvatarAsync(subject, reason, note));
+                var e = await AsyncAssert.ThrowsAsync<KrtuworksException>(() => krtu.ReportAvatarAsync(subject, reason, note));
                 Assert.That(e!.Code, Is.EqualTo("invalid_request"));
             }
             Assert.That(seen.Count, Is.EqualTo(2));

@@ -45,7 +45,10 @@ namespace Krtuworks.Unity
         static KrtuworksOptions OptionsFor(KrtuworksUnityOptions options, KrtuworksAppConfig config, string environment)
         {
             var root = Path.Combine(Application.persistentDataPath, "krtuworks");
-            if (Application.platform == RuntimePlatform.IPhonePlayer) UnityEngine.iOS.Device.SetNoBackupFlag(root);
+#if UNITY_IOS && !UNITY_EDITOR
+            // UnityEngine.iOS exists only in an iOS player build: anywhere else this line would not compile
+            UnityEngine.iOS.Device.SetNoBackupFlag(root);
+#endif
             config.Environments.TryGetValue(environment, out var clients);
             return new KrtuworksOptions
             {

@@ -192,11 +192,11 @@ namespace Krtuworks.Tests
         {
             var server = new FakeServer();
             var rig = await Build(server);
-            Assert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", 1_000_000_000_000_000, null, false));
-            Assert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", -1_000_000_000_000_000, null, false));
-            Assert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", 1, new byte[0], false));
-            Assert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", 1, new byte[65], false));
-            Assert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("Not A Key", 1, null, false));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", 1_000_000_000_000_000, null, false));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", -1_000_000_000_000_000, null, false));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", 1, new byte[0], false));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("fastest", 1, new byte[65], false));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => rig.Progress.ReportScoreAsync("Not A Key", 1, null, false));
             Assert.That(await rig.Progress.WaitingAsync(rig.Owner), Is.Zero, "nothing refused was kept");
             await rig.Progress.ReportScoreAsync("fastest", 999_999_999_999_999, new byte[64], false);
             await rig.Progress.ReportScoreAsync("fastest", -999_999_999_999_999, new byte[] { 1 }, false);

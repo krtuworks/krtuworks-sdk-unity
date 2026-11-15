@@ -65,7 +65,7 @@ namespace Krtuworks.Tests
             var locked = new SealedFileStore(dir, new FixedKey { Key = null });
             Assert.That(await locked.GetAsync("krtu:app:tokens"), Is.Null);
             Assert.That(File.Exists(files[0]), Is.True, "a missing key never deletes a secret");
-            Assert.ThrowsAsync<KrtuworksException>(() => locked.SetAsync("krtu:app:tokens", "x"));
+            await AsyncAssert.ThrowsAsync<KrtuworksException>(() => locked.SetAsync("krtu:app:tokens", "x"));
 
             // Another key (another device, a backup restored without its key): the file goes.
             Assert.That(await new SealedFileStore(dir, new FixedKey { Key = Key(2) }).GetAsync("krtu:app:tokens"), Is.Null);

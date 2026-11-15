@@ -291,7 +291,7 @@ namespace Krtuworks.Tests
             }
             catch (OperationCanceledException) { }
             var port = new Uri(new Uri(opened).Query.TrimStart('?').Split('&').Select(p => p.Split('=')).Where(p => p[0] == "redirect_uri").Select(p => Uri.UnescapeDataString(p[1])).First()).Port;
-            Assert.ThrowsAsync<SocketException>(async () => await Get(port, "/callback"), "control: nothing listens any more");
+            await AsyncAssert.ThrowsAsync<SocketException>(async () => await Get(port, "/callback"), "control: nothing listens any more");
         }
 
         static async Task<string> Get(int port, string path)

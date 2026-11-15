@@ -4,6 +4,11 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.1 - 2026-11-15
+
+### Fixed
+- Player builds for every platform but iOS failed to compile (`UnityEngine.iOS` does not exist there); only the iOS player now marks the SDK's folder as not backed up.
+
 ## 1.0.0 - 2026-11-15
 
 First release. Unity 2022.3 LTS or later.

@@ -296,7 +296,7 @@ namespace Krtuworks.Tests
             Assert.That(server.Count("POST", "/v1/me/progress/platform-sync"), Is.EqualTo(1), "allowed, the achievements line up at once");
             Assert.That(steam.UnlockCalls, Is.EqualTo(new[] { "ACH_KRTU_ONLY" }));
 
-            var notPending = Assert.ThrowsAsync<KrtuworksException>(() => krtu.AnswerPlatformConsentAsync(false));
+            var notPending = await AsyncAssert.ThrowsAsync<KrtuworksException>(() => krtu.AnswerPlatformConsentAsync(false));
             Assert.That(notPending!.Code, Is.EqualTo("consent_not_pending"));
             Assert.That(server.Count("POST", "/v1/me/platform-links/consent"), Is.EqualTo(1), "control: nothing waiting, nothing sent");
             await krtu.ShutdownAsync();
@@ -682,13 +682,13 @@ namespace Krtuworks.Tests
         }
 
         [Test]
-        public void AnEventTypeOutsideTheGrammarIsRefusedBeforeAnythingIsKept()
+        public async Task AnEventTypeOutsideTheGrammarIsRefusedBeforeAnythingIsKept()
         {
             var server = new FakeServer();
-            var krtu = KrtuworksClient.InitializeAsync(server.Options()).GetAwaiter().GetResult();
+            var krtu = await KrtuworksClient.InitializeAsync(server.Options());
             Assert.Throws<ArgumentException>(() => krtu.Track("Boss Fight"));
             Assert.That(krtu.Track("boss_fight"), Is.True, "control");
-            krtu.ShutdownAsync().GetAwaiter().GetResult();
+            await krtu.ShutdownAsync();
         }
 
         static JObject BoardsView() => new JObject
@@ -748,10 +748,10 @@ namespace Krtuworks.Tests
             Assert.That(page.Entries[1].Details, Is.EqualTo(new byte[] { 7, 8 }));
 
             var calls = server.Calls.Count;
-            Assert.Throws<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "friends").GetAwaiter().GetResult());
-            Assert.Throws<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "global", 0).GetAwaiter().GetResult());
-            Assert.Throws<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "global", 101).GetAwaiter().GetResult());
-            Assert.Throws<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "around", 10, 5).GetAwaiter().GetResult());
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "friends"));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "global", 0));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "global", 101));
+            await AsyncAssert.ThrowsAsync<ArgumentException>(() => krtu.GetLeaderboardEntriesAsync("fastest", "around", 10, 5));
             Assert.That(server.Calls.Count, Is.EqualTo(calls), "nothing was sent for a call that can never be taken");
             await krtu.GetLeaderboardEntriesAsync("fastest", "global", 100, 200);
             Assert.That(server.Calls.Last().Query["limit"], Is.EqualTo("100"), "control: the edges are taken");
@@ -927,7 +927,8 @@ namespace Krtuworks.Tests
             var fourth = await KrtuworksClient.InitializeAsync(Launch(server.Options(other)));
             await fourth.ReadyAsync();
             await fourth.FlushAsync();
-            Assert.That((steam.Reads.Count, scoreOps.Select(o => (double)o["value"]!).ToList()), Is.EqualTo((3, new List<double> { 61000 })), "asked again, answered, brought in");
+            Assert.That(steam.Reads.Count, Is.EqualTo(3), "asked again");
+            Assert.That(scoreOps.Select(o => (double)o["value"]!), Is.EqualTo(new[] { 61000d }), "answered, brought in");
             await fourth.ShutdownAsync();
         }
 
@@ -952,7 +953,9 @@ namespace Krtuworks.Tests
             await krtu.SignInAsGuestAsync("2000-01-01", Terms);
             await krtu.ReadyAsync();
             await krtu.FlushAsync();
-            Assert.That((steam.Reads, scoreOps, server.Count("GET", "/v1/me/leaderboards")), Is.EqualTo((new List<string>(), new List<JObject>(), 0)));
+            Assert.That(steam.Reads, Is.Empty);
+            Assert.That(scoreOps, Is.Empty);
+            Assert.That(server.Count("GET", "/v1/me/leaderboards"), Is.EqualTo(0));
             if (state == "PENDING_CONSENT")
             {
                 await krtu.AnswerPlatformConsentAsync(true);

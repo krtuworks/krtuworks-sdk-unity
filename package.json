@@ -1,6 +1,6 @@
 {
   "name": "com.krtuworks.sdk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "displayName": "Krtuworks SDK",
   "description": "Krtuworks ID sign-in and guests, sessions, events, progress, cloud files and remote config for Unity games and apps.",
   "unity": "2022.3",
