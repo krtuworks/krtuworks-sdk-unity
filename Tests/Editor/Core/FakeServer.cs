@@ -61,6 +61,15 @@ namespace Krtuworks.Tests
             return this;
         }
 
+        readonly List<(string Method, string Prefix, Func<FakeCall, Task<Reply>> Handler)> prefixes = new List<(string, string, Func<FakeCall, Task<Reply>>)>();
+
+        /// <summary>A route for every path under `prefix` (ids a test cannot know in advance); exact routes win.</summary>
+        internal FakeServer OnPrefix(string method, string prefix, Func<FakeCall, Reply> handler)
+        {
+            lock (routes) prefixes.Add((method, prefix, call => Task.FromResult(handler(call))));
+            return this;
+        }
+
         internal int Count(string method, string path) => Calls.Count(c => c.Method == method && c.Path == path);
 
         static Dictionary<string, string> ParseQuery(string query) => query.TrimStart('?').Split(new[] { '&' }, StringSplitOptions.RemoveEmptyEntries)
@@ -96,7 +105,14 @@ namespace Krtuworks.Tests
             lock (calls) calls.Add(call);
             if (Offline.Contains(call.Path)) throw new KrtuworksException("network_error", $"No answer from {url.Host}: offline");
             Func<FakeCall, Task<Reply>>? handler;
-            lock (routes) routes.TryGetValue($"{call.Method} {call.Path}", out handler);
+            lock (routes)
+            {
+                if (!routes.TryGetValue($"{call.Method} {call.Path}", out handler))
+                {
+                    var hit = prefixes.FirstOrDefault(p => p.Method == call.Method && call.Path.StartsWith(p.Prefix, StringComparison.Ordinal));
+                    handler = hit.Handler;
+                }
+            }
             var reply = handler != null
                 ? await handler(call)
                 : new Reply { Status = 404, Json = new JObject { ["error"] = new JObject { ["code"] = "not_found", ["message"] = call.Path } } };

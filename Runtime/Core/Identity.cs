@@ -174,11 +174,18 @@ namespace Krtuworks.Internal
         // ── Tokens ──────────────────────────────────────────────────────────
 
         /// <summary>A valid access token, refreshed first when it is about to expire (or `force`). One refresh at a time.</summary>
-        internal async Task<string> AccessTokenAsync(bool force = false)
+        internal async Task<string> AccessTokenAsync(bool force = false) => (await CredentialsAsync(force)).AccessToken;
+
+        /// <summary>
+        /// The access token together with the player it belongs to, read from the same stored tokens object: a
+        /// refresh may hand back another player's tokens (another flow signed in meanwhile), and only the pair says whose.
+        /// </summary>
+        internal async Task<(string AccessToken, string Subject)> CredentialsAsync(bool force = false)
         {
             var t = tokens ?? throw SignedOut();
-            if (!force && t.AccessExpiresAt - RefreshEarlyMs > clock.ServerNowMs) return t.AccessToken;
-            return (await refreshing.Run(() => Refresh(t.AccessToken))).AccessToken;
+            if (!force && t.AccessExpiresAt - RefreshEarlyMs > clock.ServerNowMs) return (t.AccessToken, t.Subject);
+            var next = await refreshing.Run(() => Refresh(t.AccessToken));
+            return (next.AccessToken, next.Subject);
         }
 
         Task<Answer> Token(Dictionary<string, string?> fields, string? path = null, string? clientId = null)

@@ -320,11 +320,15 @@ namespace Krtuworks.Internal
 
         /// <summary>
         /// Moves `from`'s waiting progress to `to` (the first player after anon play, or a merge target).
-        /// Frozen ops keep their ids: one the server already applied under the old account answers
-        /// `duplicate` under the new one (the merge moved its receipt), so nothing counts twice.
+        /// Everything that waits for `from` is first frozen into ops with ids and written back; only then do the
+        /// ops move, and an op the target already holds is not added again. The target and the source are two
+        /// writes: a move cut short between them (the app closed, the delete failed) and run again brings the
+        /// same ids, so nothing is added twice. One the server already applied under the old account answers
+        /// `duplicate` under the new one (the merge moved its receipt).
         /// </summary>
         internal async Task MoveAsync(string from, string to)
         {
+            if (from == to) return;
             await LoadKinds();
             await LoadBoards();
             var first = string.CompareOrdinal(from, to) < 0 ? from : to;
@@ -333,28 +337,59 @@ namespace Krtuworks.Internal
             using (await Locks.Take(Key(second)))
             {
                 var source = await Load(from);
+                if (FreezeAll(source)) await Save(from, source);
                 var target = await Load(to);
                 foreach (var s in source.Stats)
                 {
                     if (!target.Stats.TryGetValue(s.Key, out var t)) target.Stats[s.Key] = t = new StatEntry();
-                    t.InFlight.AddRange(s.Value.InFlight);
-                    t.Pending = Fold(s.Value.Pending.Concat(t.Pending), KindOf(s.Key));
+                    AddOps(t.InFlight, s.Value.InFlight);
                 }
                 foreach (var u in source.Unlocks)
                 {
                     if (!target.Unlocks.TryGetValue(u.Key, out var t)) target.Unlocks[u.Key] = t = new UnlockEntry();
-                    t.InFlight.AddRange(u.Value.InFlight);
-                    t.Pending = t.Pending || (u.Value.Pending && t.InFlight.Count == 0);
+                    AddOps(t.InFlight, u.Value.InFlight);
+                    if (t.InFlight.Count > 0) t.Pending = false;
                 }
                 foreach (var s in source.Scores)
                 {
                     if (!target.Scores.TryGetValue(s.Key, out var t)) target.Scores[s.Key] = t = new ScoreEntry();
-                    t.InFlight.AddRange(s.Value.InFlight);
-                    t.Pending = FoldScores(s.Value.Pending.Concat(t.Pending), RuleOf(s.Key));
+                    AddOps(t.InFlight, s.Value.InFlight);
                 }
                 await Save(to, target);
                 await store.DeleteAsync(Key(from));
             }
+        }
+
+        /// <summary>Adds the ops the target does not hold yet (by opId).</summary>
+        static void AddOps(List<FrozenOp> into, List<FrozenOp> ops)
+        {
+            foreach (var op in ops) if (!into.Any(held => held.OpId == op.OpId)) into.Add(op);
+        }
+
+        /// <summary>Freezes everything that waits in `state` into ops with ids (a move's first step); whether anything was.</summary>
+        bool FreezeAll(ProgressState state)
+        {
+            var frozen = false;
+            foreach (var s in state.Stats)
+            {
+                foreach (var c in Fold(s.Value.Pending, KindOf(s.Key))) s.Value.InFlight.Add(new FrozenOp { OpId = Ids.UuidV7(), Type = "stat", Key = s.Key, Value = c.Value });
+                frozen |= s.Value.Pending.Count > 0;
+                s.Value.Pending = new List<Contribution>();
+            }
+            foreach (var u in state.Unlocks)
+            {
+                if (u.Value.Pending && u.Value.InFlight.Count == 0) u.Value.InFlight.Add(new FrozenOp { OpId = Ids.UuidV7(), Type = "unlock", Key = u.Key });
+                frozen |= u.Value.Pending;
+                u.Value.Pending = false;
+            }
+            foreach (var s in state.Scores)
+            {
+                foreach (var c in FoldScores(s.Value.Pending, RuleOf(s.Key)))
+                    s.Value.InFlight.Add(new FrozenOp { OpId = Ids.UuidV7(), Type = "score", Key = s.Key, Value = c.Value, Details = c.Details, FromPlatform = c.FromPlatform ? true : (bool?)null });
+                frozen |= s.Value.Pending.Count > 0;
+                s.Value.Pending = new List<ScoreContribution>();
+            }
+            return frozen;
         }
 
         /// <summary>Freezes the next op of every stat, achievement and leaderboard with none in flight; returns every op to send (not the `parked` ones).</summary>
@@ -439,6 +474,7 @@ namespace Krtuworks.Internal
                     {
                         Method = "POST",
                         Json = new JObject { ["platform"] = opts.Platform, ["build"] = opts.Build, ["ops"] = JArray.FromObject(ops) },
+                        Owner = owner,
                     });
                 }
                 catch (KrtuworksException err)

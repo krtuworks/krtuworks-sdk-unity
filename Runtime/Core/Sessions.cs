@@ -115,7 +115,7 @@ namespace Krtuworks.Internal
                 var ticket = await platformTicket();
                 if (ticket != null) body["platformProof"] = new JObject { ["steamTicket"] = ticket };
             }
-            var answer = await api.PlayerAsync("/v1/sessions", new PlayerCall { Method = "POST", Json = body });
+            var answer = await api.PlayerAsync("/v1/sessions", new PlayerCall { Method = "POST", Json = body, Owner = owner });
             var session = answer.Json?["session"] as JObject;
             if (session == null || subject() != owner) return null;
             current = new SessionInfo { Id = (string?)session["id"] ?? "", Owner = owner, StartedAt = (string?)session["startedAt"] ?? "", PlatformLink = LinkOf(answer.Json?["platformLink"]) };
@@ -154,6 +154,7 @@ namespace Krtuworks.Internal
                 {
                     Method = "POST",
                     Json = new JObject { ["activeSeconds"] = ActiveSeconds, ["foreground"] = Foreground },
+                    Owner = session.Owner,
                 });
                 if (answer.Json?["nextHeartbeatSeconds"]?.Type == JTokenType.Integer && (int)answer.Json["nextHeartbeatSeconds"]! > 0)
                 {
@@ -185,6 +186,7 @@ namespace Krtuworks.Internal
                 {
                     Method = "POST",
                     Json = new JObject { ["activeSeconds"] = ActiveSeconds, ["foreground"] = Foreground },
+                    Owner = session.Owner,
                 });
             }
             catch (KrtuworksException err)
@@ -196,7 +198,7 @@ namespace Krtuworks.Internal
             // The session is ended even when its heartbeat failed, so the round leaves nothing open.
             try
             {
-                await api.PlayerAsync($"/v1/sessions/{session.Id}/end", new PlayerCall { Method = "POST", Json = new JObject { ["activeSeconds"] = active } });
+                await api.PlayerAsync($"/v1/sessions/{session.Id}/end", new PlayerCall { Method = "POST", Json = new JObject { ["activeSeconds"] = active }, Owner = session.Owner });
             }
             catch (KrtuworksException) when (failure != null) { /* the heartbeat's failure is the one told */ }
             if (failure != null) throw failure;
@@ -211,7 +213,7 @@ namespace Krtuworks.Internal
             if (session == null) return;
             try
             {
-                await api.PlayerAsync($"/v1/sessions/{session.Id}/end", new PlayerCall { Method = "POST", Json = new JObject { ["activeSeconds"] = active } });
+                await api.PlayerAsync($"/v1/sessions/{session.Id}/end", new PlayerCall { Method = "POST", Json = new JObject { ["activeSeconds"] = active }, Owner = session.Owner });
             }
             catch (KrtuworksException) { /* the server times it out */ }
         }

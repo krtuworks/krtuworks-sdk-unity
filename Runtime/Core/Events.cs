@@ -208,6 +208,7 @@ namespace Krtuworks.Internal
         /// </summary>
         internal async Task MoveAsync(string from, string to)
         {
+            if (from == to) return;
             await PersistAsync();
             var first = string.CompareOrdinal(from, to) < 0 ? from : to;
             var second = first == from ? to : from;
@@ -216,14 +217,24 @@ namespace Krtuworks.Internal
             {
                 var source = await Load(from);
                 if (source.Pending.Count == 0 && source.Batch == null && source.Dropped == source.Reported) return;
-                var target = await Load(to);
-                if (source.Batch != null)
+                // The dropped count leaves the source before it reaches the target: a move cut short between
+                // the writes loses it rather than says it twice.
+                var unsaid = source.Dropped - source.Reported;
+                if (unsaid > 0)
                 {
-                    if (target.Batch != null) target.Pending.InsertRange(0, source.Batch.Events);
+                    source.Reported = source.Dropped;
+                    await Save(from, source);
+                }
+                var target = await Load(to);
+                // A move run again after it was cut short brings events the target holds already: they go once.
+                var held = new HashSet<string>(target.Pending.Concat(target.Batch?.Events ?? new List<WireEvent>()).Select(e => e.Id));
+                if (source.Batch != null && source.Batch.BatchId != target.Batch?.BatchId)
+                {
+                    if (target.Batch != null) target.Pending.InsertRange(0, source.Batch.Events.Where(e => !held.Contains(e.Id)));
                     else target.Batch = source.Batch;
                 }
-                target.Pending.AddRange(source.Pending);
-                target.Dropped += source.Dropped - source.Reported;
+                target.Pending.AddRange(source.Pending.Where(e => !held.Contains(e.Id)));
+                target.Dropped += Math.Max(0, unsaid);
                 Trim(target);
                 await Save(to, target);
                 await store.DeleteAsync(Key(from));
@@ -355,6 +366,7 @@ namespace Krtuworks.Internal
                     Method = "POST",
                     Body = body,
                     Headers = new Dictionary<string, string> { ["content-type"] = "application/json", ["content-encoding"] = "gzip" },
+                    Owner = owner,
                 });
             }
             catch (KrtuworksException err)

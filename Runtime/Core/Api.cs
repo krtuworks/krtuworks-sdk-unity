@@ -19,6 +19,11 @@ namespace Krtuworks.Internal
         internal Dictionary<string, string>? Headers;
         /// <summary>Statuses that are answers, not failures (304, 202 …); 2xx always are.</summary>
         internal int[]? Accept;
+        /// <summary>
+        /// The player the call is made for (a queue's owner, a stored save's). Default: whoever plays when the
+        /// call starts. The call goes only with that player's token; with any other it is not sent.
+        /// </summary>
+        internal string? Owner;
     }
 
     /// <summary>The player's calls to the server (`/v1`, Bearer + X-Krtu-Build). Same rules as krtuworks-sdk-js/src/api.ts.</summary>
@@ -57,29 +62,32 @@ namespace Krtuworks.Internal
         }
 
         /// <summary>
-        /// A player's call. An expired or revoked token is refreshed once and the call made again; a merged
-        /// account is reported to the identity; an answer that arrives after the player changed is dropped
-        /// (`context_changed`), so it can never land in another player's state.
+        /// A player's call, for `call.Owner` (or whoever plays now). Every attempt sends only with a token of that
+        /// player: when the token in hand is another one's (the player changed while it was fetched, or before
+        /// the retry after a 401), nothing is sent (`context_changed`). An expired or revoked token is refreshed
+        /// once and the call made again; a merged account is reported to the identity; an answer that arrives
+        /// after the player changed is dropped too, so it can never land in another player's state.
         /// </summary>
         internal async Task<Answer> PlayerAsync(string path, PlayerCall call)
         {
             var generation = identity.Generation;
-            var subject = identity.Player?.Subject;
-            var answer = await Attempt(path, call, false);
+            var owner = call.Owner ?? identity.Player?.Subject ?? throw new KrtuworksException("signed_out", "No player is signed in.");
+            var answer = await Attempt(path, call, false, owner);
             if (answer.Status == 401)
             {
                 var err = Wire.ErrorOf(answer);
-                if (err.Code == "account_merged" && subject != null) await identity.MarkMergedAsync(subject, (string?)err.Details["mergedInto"]);
-                if (err.Code == "token_expired" || err.Code == "token_revoked" || err.Code == "invalid_token") answer = await Attempt(path, call, true);
+                if (err.Code == "account_merged") await identity.MarkMergedAsync(owner, (string?)err.Details["mergedInto"]);
+                if (err.Code == "token_expired" || err.Code == "token_revoked" || err.Code == "invalid_token") answer = await Attempt(path, call, true, owner);
             }
-            if (identity.Generation != generation) throw new KrtuworksException("context_changed", "The player changed while the call ran; its answer was dropped.");
+            if (identity.Generation != generation) throw new KrtuworksException("context_changed", "The player changed while the call ran; it was dropped.");
             if ((answer.Status >= 300 || answer.Status < 200) && !Accepted(call, answer.Status)) throw Wire.ErrorOf(answer);
             return answer;
         }
 
-        async Task<Answer> Attempt(string path, PlayerCall call, bool forceRefresh)
+        async Task<Answer> Attempt(string path, PlayerCall call, bool forceRefresh, string owner)
         {
-            var token = await identity.AccessTokenAsync(forceRefresh);
+            var (token, subject) = await identity.CredentialsAsync(forceRefresh);
+            if (subject != owner) throw new KrtuworksException("context_changed", "The player changed while the call ran; it was dropped.");
             var request = new HttpCall { Method = call.Method, Url = Url(path, call.Query), Body = call.Body };
             request.Headers["authorization"] = $"Bearer {token}";
             request.Headers["x-krtu-build"] = opts.Build;

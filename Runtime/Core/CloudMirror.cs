@@ -135,9 +135,10 @@ namespace Krtuworks.Internal
                 }
                 catch (KrtuworksException err)
                 {
-                    // The slot moved meanwhile, a write still settling, the server away: the next sync compares again.
-                    // Refused for good (too big, over the player's quota, the link): left alone for the session.
-                    if (!err.Retryable && err.Code != "file_conflict" && err.Code != "upload_pending")
+                    // The slot moved meanwhile, a write still settling or replaced by the game's newer save, the
+                    // server away: the next sync compares again. Refused for good (too big, over the player's
+                    // quota, the link): left alone for the session.
+                    if (!err.Retryable && err.Code != "file_conflict" && err.Code != "upload_pending" && err.Code != "save_replaced")
                     {
                         leftAlone.Add(slot.Key);
                         problem($"platform_{err.Code}", slot.Key);

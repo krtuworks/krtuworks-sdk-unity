@@ -70,7 +70,7 @@ namespace Krtuworks
     {
         public string UploadId = "";
         public string Slot = "";
-        /// <summary>saved, refused or waiting.</summary>
+        /// <summary>saved, refused, waiting or replaced (a newer save of the slot took its place).</summary>
         public string Outcome = "";
         public string? Code;
     }
@@ -99,6 +99,10 @@ namespace Krtuworks.Internal
         [JsonProperty("bytes")] public byte[] Bytes = Array.Empty<byte>();
         [JsonProperty("deviceInfo")] public Dictionary<string, string>? DeviceInfo;
         [JsonProperty("savedAt")] public long SavedAt;
+        /// <summary>Order of saves made in the same millisecond on this device.</summary>
+        [JsonProperty("seq")] public int Seq;
+        /// <summary>2: when it was last sent is in its own key (none = never sent). An older record (0) was sent when it was made.</summary>
+        [JsonProperty("v")] public int V;
     }
 
     /// <summary>
@@ -110,6 +114,11 @@ namespace Krtuworks.Internal
     internal sealed class Files
     {
         static readonly TimeSpan PollLimit = TimeSpan.FromSeconds(60);
+        /// <summary>
+        /// How long after its last send an upload the server does not know can still arrive (an edge holds a
+        /// whole request before it reaches the server). Past it, a save no one heard of is gone.
+        /// </summary>
+        const long ArrivalWindowMs = 15 * 60_000;
 
         readonly Resolved opts;
         readonly Api api;
@@ -119,6 +128,8 @@ namespace Krtuworks.Internal
         readonly Action onSaved;
         /// <summary>Per slot (and device), bumped by every save started here: a read compares it before and after.</summary>
         readonly Dictionary<string, int> revisions = new Dictionary<string, int>();
+        /// <summary>Orders the saves started in one millisecond.</summary>
+        int seq;
 
         internal Files(Resolved opts, Api api, IKrtuStore store, Func<string?> subject, Func<int> generation, Action onSaved)
         {
@@ -136,10 +147,55 @@ namespace Krtuworks.Internal
         string SlotPath(string slot) => $"{FilesPath}/{Uri.EscapeDataString(slot)}";
         string UploadKey(string uploadId) => $"krtu:{opts.ClientId}:upload:{uploadId}";
         string UploadPrefix => $"krtu:{opts.ClientId}:upload:";
+        string SentPrefix => $"krtu:{opts.ClientId}:uploadSent:";
+        string SentKey(string uploadId) => $"{SentPrefix}{uploadId}";
+        static long Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-        internal async Task<SlotList> ListAsync()
+        /// <summary>One lane per player, slot and device: its saves go one at a time, oldest first.</summary>
+        string LaneLock(PendingUpload upload) =>
+            $"krtu:{opts.ClientId}:uploadLane:{new JArray(upload.Owner, upload.Slot, upload.Device == null ? JValue.CreateNull() : new JValue(upload.Device)).ToString(Formatting.None)}";
+
+        async Task Forget(string uploadId)
         {
-            var answer = await api.PlayerAsync(FilesPath, new PlayerCall());
+            await store.DeleteAsync(UploadKey(uploadId));
+            await store.DeleteAsync(SentKey(uploadId));
+        }
+
+        /// <summary>When the upload was last sent; null when it never was.</summary>
+        async Task<long?> SentAt(PendingUpload upload)
+        {
+            var text = await store.GetAsync(SentKey(upload.UploadId));
+            if (text != null && long.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var at)) return at;
+            return upload.V == 2 ? (long?)null : upload.SavedAt;
+        }
+
+        static int Compare(PendingUpload a, PendingUpload b)
+        {
+            if (a.SavedAt != b.SavedAt) return a.SavedAt < b.SavedAt ? -1 : 1;
+            if (a.Seq != b.Seq) return a.Seq < b.Seq ? -1 : 1;
+            return string.CompareOrdinal(a.UploadId, b.UploadId);
+        }
+
+        /// <summary>The store's uploads of `upload`'s lane, oldest first.</summary>
+        async Task<List<PendingUpload>> Lane(PendingUpload upload)
+        {
+            var output = new List<PendingUpload>();
+            foreach (var key in await store.KeysAsync(UploadPrefix))
+            {
+                var u = await Json.Get<PendingUpload>(store, key);
+                if (u != null && u.Owner == upload.Owner && u.Slot == upload.Slot && u.Device == upload.Device) output.Add(u);
+            }
+            output.Sort(Compare);
+            return output;
+        }
+
+        static KrtuworksException Replaced() => new KrtuworksException("save_replaced", "A newer save of this slot took the place of this one before it was sent.", 409);
+
+        internal Task<SlotList> ListAsync() => ListFor(null);
+
+        async Task<SlotList> ListFor(string? owner)
+        {
+            var answer = await api.PlayerAsync(FilesPath, new PlayerCall { Owner = owner });
             return answer.Json?.ToObject<SlotList>() ?? new SlotList();
         }
 
@@ -171,7 +227,8 @@ namespace Krtuworks.Internal
 
         /// <summary>
         /// Saves a new version of `slot`. Completes with the new version once the server activated it; throws
-        /// `file_conflict` (`Details["current"]`: the version now in the slot) when another one came first.
+        /// `file_conflict` (`Details["current"]`: the version now in the slot) when another one came first, and
+        /// `save_replaced` when a newer save of the slot took its place before it was sent.
         /// </summary>
         /// <param name="conditional">Whether `baseVersion` is meant (null = the slot must be empty); SETTINGS-like slots need neither.</param>
         internal async Task<FileVersion> SaveAsync(string slot, byte[] data, bool conditional, string? baseVersion, SaveDevice? device)
@@ -190,10 +247,112 @@ namespace Krtuworks.Internal
                 Sha256 = Ids.Sha256Hex(data),
                 Bytes = data,
                 DeviceInfo = device?.Info,
-                SavedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                SavedAt = Now(),
+                Seq = System.Threading.Interlocked.Increment(ref seq),
+                V = 2,
             };
             await Json.Put(store, UploadKey(upload.UploadId), upload);
-            return await Send(upload);
+            return await Pump(upload, (_, __, ___) => { });
+        }
+
+        /// <summary>
+        /// Sends `target` in its lane's order. An earlier save of the lane that was never sent is replaced by the
+        /// newer one; an earlier save that was sent is settled first (asked how it ended, or sent again with its
+        /// id), so an older copy never lands after a newer one. `target` itself is replaced when a newer save of
+        /// the lane waits behind it, unsent. `tell` hears what became of the earlier ones.
+        /// </summary>
+        async Task<FileVersion> Pump(PendingUpload target, Action<PendingUpload, string, string?> tell)
+        {
+            using (await Locks.Take(LaneLock(target)))
+            {
+                var lane = await Lane(target);
+                var at = lane.FindIndex(u => u.UploadId == target.UploadId);
+                if (at < 0) return await SettledElsewhere(target);
+                // The earlier ones never sent go first: this save replaces them whatever became of the others.
+                var sentEarlier = new List<PendingUpload>();
+                foreach (var earlier in lane.Take(at))
+                {
+                    if (await SentAt(earlier) != null) sentEarlier.Add(earlier);
+                    else
+                    {
+                        await Forget(earlier.UploadId);
+                        tell(earlier, "replaced", null);
+                    }
+                }
+                foreach (var earlier in sentEarlier)
+                {
+                    var (outcome, code) = await SettleEarlier(earlier);
+                    tell(earlier, outcome, code);
+                }
+                if (at < lane.Count - 1 && await SentAt(target) == null)
+                {
+                    await Forget(target.UploadId);
+                    throw Replaced();
+                }
+                return await Send(target);
+            }
+        }
+
+        /// <summary>
+        /// An earlier save of a lane that was sent and whose outcome is not known here: how it ended, before
+        /// anything newer goes. Throws when it has not ended yet (or the server cannot be asked): the lane waits.
+        /// </summary>
+        async Task<(string Outcome, string? Code)> SettleEarlier(PendingUpload upload)
+        {
+            JObject? state;
+            try
+            {
+                state = (await api.PlayerAsync($"{SlotPath(upload.Slot)}/uploads/{upload.UploadId}", new PlayerCall { Owner = upload.Owner })).Json;
+            }
+            catch (KrtuworksException err) when (err.Code == "upload_not_found")
+            {
+                // The server never had it. A save with a version check is replaced at once: should it still arrive,
+                // the newer save holds the slot and the check refuses it. One without a check could land over the
+                // newer save, so it is replaced only once it can no longer arrive.
+                if (upload.Conditional || Now() - (await SentAt(upload) ?? 0) >= ArrivalWindowMs)
+                {
+                    await Forget(upload.UploadId);
+                    return ("replaced", null);
+                }
+                // It may still be on its way: sent again with its id, the server takes both as one upload.
+                try
+                {
+                    await Send(upload);
+                    return ("saved", null);
+                }
+                catch (KrtuworksException sent) when (!sent.Retryable && sent.Code != "upload_pending")
+                {
+                    return ("refused", sent.Code);
+                }
+            }
+            var status = (string?)state?["status"];
+            if (status == "ACTIVATED")
+            {
+                await Forget(upload.UploadId);
+                onSaved();
+                return ("saved", null);
+            }
+            if (status == "REJECTED")
+            {
+                await Forget(upload.UploadId);
+                return ("refused", (string?)state?["code"] ?? "write_failed");
+            }
+            throw new KrtuworksException("upload_pending", "An earlier save of this slot is still being written; this one goes after it.", 202, null, new JObject { ["uploadId"] = upload.UploadId });
+        }
+
+        /// <summary>The save's record is gone: another flow finished or replaced it; the server says how it ended.</summary>
+        async Task<FileVersion> SettledElsewhere(PendingUpload upload)
+        {
+            JObject? state;
+            try
+            {
+                state = (await api.PlayerAsync($"{SlotPath(upload.Slot)}/uploads/{upload.UploadId}", new PlayerCall { Owner = upload.Owner })).Json;
+            }
+            catch (KrtuworksException err) when (err.Code == "upload_not_found")
+            {
+                throw Replaced();
+            }
+            return await Settle(upload, state);
         }
 
         async Task<FileVersion> Send(PendingUpload upload)
@@ -206,14 +365,15 @@ namespace Krtuworks.Internal
             }
             var query = Query(("platform", opts.Platform), ("build", opts.Build), ("device", upload.Device));
             foreach (var info in upload.DeviceInfo ?? new Dictionary<string, string>()) query[info.Key] = info.Value;
+            await Json.Put(store, SentKey(upload.UploadId), Now());
             Answer answer;
             try
             {
-                answer = await api.PlayerAsync(SlotPath(upload.Slot), new PlayerCall { Method = "PUT", Query = query, Headers = headers, Body = upload.Bytes, Accept = new[] { 202 } });
+                answer = await api.PlayerAsync(SlotPath(upload.Slot), new PlayerCall { Method = "PUT", Query = query, Headers = headers, Body = upload.Bytes, Accept = new[] { 202 }, Owner = upload.Owner });
             }
             catch (KrtuworksException err)
             {
-                if (!err.Retryable) await store.DeleteAsync(UploadKey(upload.UploadId));
+                if (!err.Retryable) await Forget(upload.UploadId);
                 throw;
             }
             if (answer.Status == 201) return await Done(upload, answer.Json?["file"]?.ToObject<FileVersion>(), null);
@@ -233,7 +393,7 @@ namespace Krtuworks.Internal
                 if (status == "ACTIVATED") return await Done(upload, null, (string?)current?["file"]?["id"]);
                 if (status == "REJECTED")
                 {
-                    await store.DeleteAsync(UploadKey(upload.UploadId));
+                    await Forget(upload.UploadId);
                     throw new KrtuworksException((string?)current?["code"] ?? "write_failed", "The save was refused.", 409, null, new JObject { ["upload"] = current });
                 }
                 if (DateTimeOffset.UtcNow - started > PollLimit)
@@ -242,43 +402,58 @@ namespace Krtuworks.Internal
                 wait = Math.Min(8000, wait * 2);
                 // Another player now: this upload is asked about with its own player's token on a later sign-in.
                 if (generation() != gen) throw new KrtuworksException("context_changed", "The player changed while the save was being written; it is finished when that player signs in again.");
-                var answer = await api.PlayerAsync($"{SlotPath(upload.Slot)}/uploads/{upload.UploadId}", new PlayerCall());
+                var answer = await api.PlayerAsync($"{SlotPath(upload.Slot)}/uploads/{upload.UploadId}", new PlayerCall { Owner = upload.Owner });
                 current = answer.Json;
             }
         }
 
         async Task<FileVersion> Done(PendingUpload upload, FileVersion? file, string? versionId)
         {
-            await store.DeleteAsync(UploadKey(upload.UploadId));
+            await Forget(upload.UploadId);
             onSaved();
             if (file != null) return file;
             // An answer replayed from the upload's record names the version; read the slot for the whole of it.
-            var list = await ListAsync();
+            var list = await ListFor(upload.Owner);
             var slot = list.Slots.FirstOrDefault(s => s.Key == upload.Slot);
             var versions = new List<FileVersion?> { slot?.File }.Concat(slot?.Devices ?? new List<FileVersion>()).Where(v => v != null).Select(v => v!).ToList();
             return versions.FirstOrDefault(v => v.Id == versionId) ?? versions.FirstOrDefault()
                 ?? throw new KrtuworksException("file_not_found", "The saved version is no longer the slot's.", 404);
         }
 
-        /// <summary>Saves left unfinished by an earlier launch (an answer lost, a 202): finishes the signed-in player's.</summary>
+        /// <summary>
+        /// Saves left unfinished by an earlier launch (an answer lost, a 202, made offline): finishes the
+        /// signed-in player's, the newest of each slot (and device) last; an older one never sent is replaced.
+        /// </summary>
         internal async Task<List<ResumedUpload>> ResumeAsync()
         {
             var owner = subject();
             var output = new List<ResumedUpload>();
             if (owner == null) return output;
-            foreach (var key in await store.KeysAsync(UploadPrefix))
+            var ids = new HashSet<string>((await store.KeysAsync(UploadPrefix)).Select(k => k.Substring(UploadPrefix.Length)));
+            foreach (var key in await store.KeysAsync(SentPrefix)) if (!ids.Contains(key.Substring(SentPrefix.Length))) await store.DeleteAsync(key);
+            var newest = new Dictionary<string, PendingUpload>();
+            var order = new List<string>();
+            foreach (var id in ids)
             {
-                var upload = await Json.Get<PendingUpload>(store, key);
+                var upload = await Json.Get<PendingUpload>(store, UploadKey(id));
                 if (upload == null || upload.Owner != owner) continue;
+                var lane = LaneLock(upload);
+                if (!newest.TryGetValue(lane, out var held)) order.Add(lane);
+                if (held == null || Compare(held, upload) < 0) newest[lane] = upload;
+            }
+            void Tell(PendingUpload u, string outcome, string? code) => output.Add(new ResumedUpload { UploadId = u.UploadId, Slot = u.Slot, Outcome = outcome, Code = code });
+            foreach (var lane in order)
+            {
+                var upload = newest[lane];
                 try
                 {
                     // Sent again with the same id and bytes: the server answers what the first one did.
-                    await Send(upload);
-                    output.Add(new ResumedUpload { UploadId = upload.UploadId, Slot = upload.Slot, Outcome = "saved" });
+                    await Pump(upload, Tell);
+                    Tell(upload, "saved", null);
                 }
                 catch (KrtuworksException err)
                 {
-                    output.Add(new ResumedUpload { UploadId = upload.UploadId, Slot = upload.Slot, Outcome = err.Code == "upload_pending" || err.Retryable ? "waiting" : "refused", Code = err.Code });
+                    Tell(upload, err.Code == "save_replaced" ? "replaced" : err.Code == "upload_pending" || err.Retryable ? "waiting" : "refused", err.Code);
                 }
             }
             return output;
@@ -305,12 +480,12 @@ namespace Krtuworks.Internal
             var waiting = await Json.Get<PendingUpload>(store, UploadKey(uploadId)) ?? throw new KrtuworksException("upload_not_found", "No such waiting save on this device.", 404);
             var device = waiting.Device == null ? null : new SaveDevice { Id = waiting.Device, Info = waiting.DeviceInfo ?? new Dictionary<string, string>() };
             var saved = await SaveAsync(waiting.Slot, waiting.Bytes, true, baseVersion, device);
-            await store.DeleteAsync(UploadKey(uploadId));
+            await Forget(uploadId);
             return saved;
         }
 
         /// <summary>A waiting save the player chose not to keep.</summary>
-        internal Task DiscardWaitingAsync(string uploadId) => store.DeleteAsync(UploadKey(uploadId));
+        internal Task DiscardWaitingAsync(string uploadId) => Forget(uploadId);
 
         /// <summary>
         /// Offers the platform cloud's copy of a SAVE or PROFILE slot for the player's choice (Steam sync, Steam Cloud):

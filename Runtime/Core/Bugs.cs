@@ -306,7 +306,7 @@ namespace Krtuworks.Internal
                 {
                     if (w.BugId == null)
                     {
-                        var answer = await api.PlayerAsync("/v1/me/bug-reports", new PlayerCall { Method = "POST", Json = w.Body });
+                        var answer = await api.PlayerAsync("/v1/me/bug-reports", new PlayerCall { Method = "POST", Json = w.Body, Owner = player });
                         w.BugId = (string?)answer.Json?["report"]?["id"] ?? throw new KrtuworksException("invalid_answer", "The server answered without the report.");
                         if (w.Screenshot != null) await Json.Put(store, key, w);
                     }
@@ -319,6 +319,7 @@ namespace Krtuworks.Internal
                                 Method = "PUT",
                                 Body = Convert.FromBase64String(w.Screenshot.Bytes),
                                 Headers = new Dictionary<string, string> { ["content-type"] = w.Screenshot.Type },
+                                Owner = player,
                             });
                         }
                         catch (KrtuworksException e) when (ScreenshotRefused.Contains(e.Status))

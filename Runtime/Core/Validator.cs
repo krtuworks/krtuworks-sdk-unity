@@ -259,9 +259,10 @@ namespace Krtuworks
                     catch (KrtuworksException err) when (err.Code == "too_many_writes" && (err.RetryAfter ?? WriteLimitSeconds) <= WriteWaitSeconds)
                     {
                         // A slot takes one write per 10 seconds: a run right after another waits and sends the same save again.
+                        // An older save of this slot left by another run is replaced by this one; only this one's outcome counts.
                         Func<TimeSpan, CancellationToken, Task> delay = options.Delay ?? Task.Delay;
                         await delay(TimeSpan.FromSeconds((err.RetryAfter ?? WriteLimitSeconds) + 0.25), CancellationToken.None);
-                        var resent = (await k.ResumeFilesAsync()).Where(u => u.Slot == slot.Key).ToList();
+                        var resent = (await k.ResumeFilesAsync()).Where(u => u.Slot == slot.Key && u.Outcome != "replaced").ToList();
                         var refused = resent.FirstOrDefault(u => u.Outcome != "saved");
                         if (refused != null || resent.Count == 0) return Check("cloud_save", "FAILED", refused?.Code ?? "not sent");
                     }
