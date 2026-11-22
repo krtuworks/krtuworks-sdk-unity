@@ -281,17 +281,26 @@ namespace Krtuworks.Internal
             throw SignedOut();
         }
 
+        /// <summary>
+        /// The merged player's queues wait for the merge check. Only when that player is still the signed-in
+        /// one are its tokens dropped and the app told: a late answer for a player who already left must not
+        /// sign out the one who plays now.
+        /// </summary>
         async Task<StoredTokens> MarkMergedLocked(string previousSubject, string? mergedInto)
         {
             var meta = await MetaAsync();
             if (!meta.WaitingOwners.Contains(previousSubject)) meta.WaitingOwners.Add(previousSubject);
             await SaveMeta(meta);
-            await Adopt(null);
-            Emit(new IdentityChange { Type = "merged", PreviousSubject = previousSubject, MergedInto = mergedInto });
+            var stored = await Json.Get<StoredTokens>(secrets, Key("tokens"));
+            if (stored?.Subject == previousSubject)
+            {
+                await Adopt(null);
+                Emit(new IdentityChange { Type = "merged", PreviousSubject = previousSubject, MergedInto = mergedInto });
+            }
             throw new KrtuworksException("account_merged", "This account was merged into another one; sign in with it.", 401, null, new JObject { ["mergedInto"] = mergedInto });
         }
 
-        /// <summary>The server said the player's account went into another one (401 account_merged).</summary>
+        /// <summary>The server said a player's account went into another one (401 account_merged on that player's call).</summary>
         internal async Task MarkMergedAsync(string previousSubject, string? mergedInto)
         {
             using (await Locks.Take(LockName)) await MarkMergedLocked(previousSubject, mergedInto);

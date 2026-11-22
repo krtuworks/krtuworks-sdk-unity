@@ -54,6 +54,8 @@ namespace Krtuworks.Internal
         long nextHeartbeatAt = long.MaxValue;
         long activeMs;
         long? activeSince;
+        /// <summary>The launch's time in use when the current session began: the server counts only what follows.</summary>
+        long sessionBaseMs;
         /// <summary>Told after each heartbeat (the minutes of play moved).</summary>
         internal Action? OnHeartbeat;
         /// <summary>Told the licence list of a session answer (only an open that sent a platform proof gets one).</summary>
@@ -80,8 +82,16 @@ namespace Krtuworks.Internal
 
         internal bool Foreground => activeSince.HasValue;
 
+        long LaunchActiveMs => activeMs + (activeSince.HasValue ? clock.ElapsedMilliseconds - activeSince.Value : 0);
+
         /// <summary>Seconds in use in this launch (foreground only).</summary>
-        internal long ActiveSeconds => (activeMs + (activeSince.HasValue ? clock.ElapsedMilliseconds - activeSince.Value : 0)) / 1000;
+        internal long ActiveSeconds => LaunchActiveMs / 1000;
+
+        /// <summary>
+        /// Seconds in use since the current session began (foreground only): what the session reports. A
+        /// session opened after another one (a new player, a timeout) starts from zero, not from the launch's total.
+        /// </summary>
+        internal long SessionActiveSeconds => Math.Max(0, LaunchActiveMs - sessionBaseMs) / 1000;
 
         internal void SetForeground(bool foreground)
         {
@@ -106,7 +116,12 @@ namespace Krtuworks.Internal
             var owner = subject();
             if (owner == null) return null;
             if (current != null && current.Owner != owner) Close();
-            clientSessionId ??= Ids.UuidV4();
+            if (clientSessionId == null)
+            {
+                // A new session (not an open sent again after a lost answer): its time in use starts now.
+                clientSessionId = Ids.UuidV4();
+                sessionBaseMs = LaunchActiveMs;
+            }
             var body = new JObject { ["clientSessionId"] = clientSessionId, ["platform"] = opts.Platform, ["build"] = opts.Build };
             if (opts.Device != null) body["device"] = JObject.FromObject(opts.Device, Newtonsoft.Json.JsonSerializer.Create(Json.Settings));
             if (opts.Locale != null) body["locale"] = opts.Locale;
@@ -153,7 +168,7 @@ namespace Krtuworks.Internal
                 var answer = await api.PlayerAsync($"/v1/sessions/{session.Id}/heartbeat", new PlayerCall
                 {
                     Method = "POST",
-                    Json = new JObject { ["activeSeconds"] = ActiveSeconds, ["foreground"] = Foreground },
+                    Json = new JObject { ["activeSeconds"] = SessionActiveSeconds, ["foreground"] = Foreground },
                     Owner = session.Owner,
                 });
                 if (answer.Json?["nextHeartbeatSeconds"]?.Type == JTokenType.Integer && (int)answer.Json["nextHeartbeatSeconds"]! > 0)
@@ -185,7 +200,7 @@ namespace Krtuworks.Internal
                 await api.PlayerAsync($"/v1/sessions/{session.Id}/heartbeat", new PlayerCall
                 {
                     Method = "POST",
-                    Json = new JObject { ["activeSeconds"] = ActiveSeconds, ["foreground"] = Foreground },
+                    Json = new JObject { ["activeSeconds"] = SessionActiveSeconds, ["foreground"] = Foreground },
                     Owner = session.Owner,
                 });
             }
@@ -193,7 +208,7 @@ namespace Krtuworks.Internal
             {
                 failure = err;
             }
-            var active = ActiveSeconds;
+            var active = SessionActiveSeconds;
             Close();
             // The session is ended even when its heartbeat failed, so the round leaves nothing open.
             try
@@ -208,7 +223,7 @@ namespace Krtuworks.Internal
         internal async Task EndAsync()
         {
             var session = Session;
-            var active = ActiveSeconds;
+            var active = SessionActiveSeconds;
             Close();
             if (session == null) return;
             try

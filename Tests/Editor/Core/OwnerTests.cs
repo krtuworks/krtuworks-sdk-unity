@@ -157,6 +157,78 @@ namespace Krtuworks.Tests
         }
 
         [Test]
+        public async Task ALateAccountMergedAnswerForThePlayerWhoLeftDoesNotSignOutTheOneWhoPlays_ControlForThePlayerStillSignedInItDoes()
+        {
+            foreach (var switched in new[] { true, false })
+            {
+                var server = new FakeServer();
+                var rig = await Build(server);
+                var changes = new List<string>();
+                rig.Identity.Changed += change => changes.Add(change.Type);
+                await rig.Progress.LearnKindsAsync(new[] { ("coins", "SUM") });
+                await rig.Progress.ReportAsync("add", "coins", 5);
+                server.OnAsync("POST", "/v1/me/progress", async call =>
+                {
+                    // While A's call is on its way the player becomes B; then A's answer arrives: A's account was merged.
+                    if (switched)
+                    {
+                        await AnotherFlowSignsIn(rig);
+                        await rig.Identity.CredentialsAsync(true);
+                    }
+                    return new Reply { Status = 401, Json = new JObject { ["error"] = new JObject { ["code"] = "account_merged", ["message"] = "x" }, ["mergedInto"] = "pw_target_cccccccccccc" } };
+                });
+                var output = await rig.Progress.FlushAsync();
+                var kept = await Json.Get<StoredTokens>(rig.Secrets, $"krtu:{rig.Opts.ClientId}:tokens");
+                Assert.That(output.StoppedBy, Is.EqualTo("account_merged"));
+                Assert.That(await rig.Identity.WaitingOwnersAsync(), Does.Contain(A), "A's queues wait for the merge check either way");
+                if (switched)
+                {
+                    Assert.That(rig.Identity.Player?.Subject, Is.EqualTo(B), "B plays on");
+                    Assert.That(kept?.Subject, Is.EqualTo(B), "B's tokens stay");
+                    Assert.That(changes, Does.Not.Contain("merged"), "B is not told of a merge that was not its own");
+                }
+                else
+                {
+                    Assert.That(rig.Identity.Player, Is.Null, "A, merged, is signed out");
+                    Assert.That(kept, Is.Null);
+                    Assert.That(changes, Does.Contain("merged"));
+                }
+            }
+        }
+
+        [Test]
+        public async Task ASessionReportsOnlyItsOwnTimeInUse_ANewOneForAnotherPlayerStartsFromZero_ControlTheFirstCountsItsTime()
+        {
+            var server = new FakeServer();
+            var rig = await Build(server);
+            var opened = 0;
+            server.On("POST", "/v1/sessions", _ =>
+            {
+                opened++;
+                return new Reply { Status = 201, Json = new JObject { ["session"] = new JObject { ["id"] = $"ses_{opened}", ["startedAt"] = Clock.IsoNow() }, ["heartbeatSeconds"] = 60 } };
+            });
+            server.OnPrefix("POST", "/v1/sessions/ses_", _ => FakeServer.Ok(new JObject { ["nextHeartbeatSeconds"] = 60 }));
+            var sessions = new SessionKeeper(rig.Opts, new Api(rig.Opts, rig.Identity, server, new Clock()), () => rig.Identity.Player?.Subject, null);
+            await sessions.OpenAsync();
+            await Task.Delay(1100);
+            await sessions.HeartbeatAsync();
+            // The app goes to the background and the player changes: B's session starts with nothing in use.
+            sessions.SetForeground(false);
+            await AnotherFlowSignsIn(rig);
+            await rig.Identity.CredentialsAsync(true);
+            sessions.Close();
+            await sessions.OpenAsync();
+            await sessions.HeartbeatAsync();
+            var beats = server.Calls.Where(c => c.Path.EndsWith("/heartbeat")).Select(c => ((long)c.Json!["activeSeconds"]!, (bool)c.Json!["foreground"]!)).ToList();
+            Assert.That(beats.Count, Is.EqualTo(2));
+            Assert.That(beats[0].Item1, Is.EqualTo(1), "A's session counts its second");
+            Assert.That(beats[0].Item2, Is.True);
+            Assert.That(beats[1].Item1, Is.EqualTo(0), "B's session does not take A's time");
+            Assert.That(beats[1].Item2, Is.False);
+            Assert.That(sessions.ActiveSeconds, Is.EqualTo(1), "the launch keeps its own total");
+        }
+
+        [Test]
         public async Task ASaveWhoseStoreWriteThePlayerOutlivedIsNotSentWithTheNewPlayersToken_ControlItIsSentWithItsOwn()
         {
             foreach (var switched in new[] { true, false })

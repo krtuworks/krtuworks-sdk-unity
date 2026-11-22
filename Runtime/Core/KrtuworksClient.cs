@@ -202,7 +202,7 @@ namespace Krtuworks
                 listeners(report);
                 return true;
             });
-            presence = new PresenceKeeper(options, platform as IPlatformPresence, api, store, () => config.ModuleOn("presence"), () => levels.InPlay?.Level, () => sessions.ActiveSeconds, line => bugs.Log(line));
+            presence = new PresenceKeeper(options, platform as IPlatformPresence, api, store, () => config.ModuleOn("presence"), () => levels.InPlay?.Level, () => sessions.SessionActiveSeconds, line => bugs.Log(line));
             sessions.OnHeartbeat = () => presence.ReapplyAuto(false);
             licences = new EntitlementKeeper(options, platform as IPlatformOwnership, api, store, Subject);
             sessions.OnEntitlements = licences.FromSessionAsync;
