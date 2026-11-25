@@ -217,6 +217,16 @@ namespace Krtuworks.Internal
             };
         }
 
+        /// <summary>Tokens another flow wrote for a different player are taken up like a sign-in here: the app and the client are told.</summary>
+        async Task AdoptFromAnotherFlow(StoredTokens stored)
+        {
+            var changed = tokens?.Subject != stored.Subject;
+            await Adopt(stored);
+            if (!changed) return;
+            var player = Player!;
+            Emit(new IdentityChange { Type = player.Kind == PlayerKind.Guest ? "guest" : "signed_in", Player = player });
+        }
+
         async Task<StoredTokens> Refresh(string usedAccess)
         {
             using (await Locks.Take(LockName))
@@ -229,9 +239,10 @@ namespace Krtuworks.Internal
                 }
                 if (stored.AccessToken != usedAccess && stored.AccessExpiresAt - RefreshEarlyMs > clock.ServerNowMs)
                 {
-                    await Adopt(stored);
+                    await AdoptFromAnotherFlow(stored);
                     return stored;
                 }
+                if (stored.Subject != tokens?.Subject) await AdoptFromAnotherFlow(stored);
                 if (stored.RefreshToken == null)
                 {
                     if (stored.Kind == "guest") return await GuestAgain(stored);

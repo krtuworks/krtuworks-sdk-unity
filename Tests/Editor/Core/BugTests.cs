@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Krtuworks.Internal;
 using Newtonsoft.Json.Linq;
@@ -298,6 +299,90 @@ namespace Krtuworks.Tests
             }
             Assert.That(seen.Count, Is.EqualTo(2));
             await krtu.ShutdownAsync();
+        }
+
+        [Test]
+        public async Task AReportCarriesOnlyItsOwnPlayersEventsAndLogLines_ControlThePlayersOwnStay()
+        {
+            var server = new FakeServer();
+            var reports = new Dictionary<string, Kept>();
+            BugRoutes(server, reports);
+            var store = new MemoryStore();
+            var krtu = await Started(server, store);
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            await krtu.ReadyAsync();
+            krtu.Track("screen_view", new { screen = "a-menu" });
+            krtu.Log("a line");
+            var a = await krtu.ReportBugAsync(new BugReportInput { Category = "OTHER", Description = "from A" });
+            await krtu.SignOutAsync();
+            krtu.Log("between players");
+            // Another person on the same device: a new device key, a new guest.
+            await store.DeleteAsync("krtu:buried.test.native:deviceKey");
+            server.GuestRoutes("pw_other_bbbbbbbbbbbb");
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            await krtu.ReadyAsync();
+            krtu.Track("screen_view", new { screen = "b-menu" });
+            krtu.Log("b line");
+            var b = await krtu.ReportBugAsync(new BugReportInput { Category = "OTHER", Description = "from B" });
+            await krtu.FlushAsync();
+            var forA = reports[a].Body;
+            Assert.That(((JArray)forA["events"]!).Select(e => (string?)e["data"]!["screen"]), Is.EqualTo(new[] { "a-menu" }), "A's report keeps A's event");
+            StringAssert.Contains("a line", (string)forA["log"]!);
+            var forB = reports[b].Body;
+            Assert.That(((JArray)forB["events"]!).Select(e => (string?)e["data"]!["screen"]), Is.EqualTo(new[] { "b-menu" }), "B's report has no event of A");
+            StringAssert.DoesNotContain("a line", (string)forB["log"]!);
+            StringAssert.IsMatch("between players\n.*b line$", (string)forB["log"]!);
+            await krtu.ShutdownAsync();
+        }
+
+        [Test]
+        public void WhatTheSdkAddsToAReportIsCutByBytes_MultiByteTextStaysUnderTheServerLimit_ControlAsciiIsCutAsBefore()
+        {
+            var server = new FakeServer();
+            var opts = Resolved.From(server.Options());
+            var cjk = new string('\u6f22', 1700);
+            var events = Enumerable.Range(0, 50).Select(i => new JObject { ["type"] = "screen_view", ["at"] = i.ToString(), ["data"] = new JObject { ["text"] = cjk } }).ToList();
+            var log = string.Join("\n", Enumerable.Range(0, 33).Select(i => $"{i} {new string('\u5b57', 990)}"));
+            var body = BugReports.ReportBody(new BugReportInput { Category = "OTHER", Description = new string('\u9577', 4000) }, "r1", opts, null, null, events, log);
+            Assert.That(Encoding.UTF8.GetByteCount(body.ToString(Newtonsoft.Json.Formatting.None)), Is.LessThan(262_144 - 10_000), "room left under the 256 KiB body limit");
+            var kept = (JArray)body["events"]!;
+            Assert.That((string?)kept.Last!["at"], Is.EqualTo("49"), "the newest event stays");
+            Assert.That(kept.Count, Is.LessThan(50));
+            var lines = ((string)body["log"]!).Split('\n');
+            Assert.That(lines.Length, Is.LessThan(33));
+            Assert.That(lines.All(l => Regex.IsMatch(l, "^\\d+ \u5b57{990}$")), Is.True, "whole lines, from the oldest cut");
+            Assert.That(lines.Last().StartsWith("32 "), Is.True, "the newest log line stays");
+            // control: ASCII within the character budgets is not cut by the byte budgets
+            var ascii = Enumerable.Range(0, 50).Select(i => new JObject { ["type"] = "screen_view", ["at"] = i.ToString(), ["data"] = new JObject { ["screen"] = new string('s', 1790) } }).ToList();
+            var plain = BugReports.ReportBody(new BugReportInput { Category = "OTHER", Description = "x" }, "r1", opts, null, null, ascii, new string('l', 32_768));
+            Assert.That(((JArray)plain["events"]!).Count, Is.EqualTo(48));
+            Assert.That(((string)plain["log"]!).Length, Is.EqualTo(32_768));
+        }
+
+        [Test]
+        public async Task AReportOfMultiByteEventsAndLogIsTakenByAServerThatRefusesABodyOver256KiB_ControlAnAsciiOneToo()
+        {
+            foreach (var text in new[] { "\u6f22", "x" })
+            {
+                var server = new FakeServer();
+                var reports = new Dictionary<string, Kept>();
+                BugRoutes(server, reports);
+                var keep = server.RouteFor("POST", "/v1/me/bug-reports");
+                server.OnAsync("POST", "/v1/me/bug-reports", call => call.Raw.Length > 262_144
+                    ? Task.FromResult(new Reply { Status = 413, Json = new JObject { ["error"] = new JObject { ["code"] = "payload_too_large", ["message"] = "big" } } })
+                    : keep(call));
+                var krtu = await Started(server);
+                await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+                await krtu.ReadyAsync();
+                for (var i = 0; i < 50; i += 1) krtu.Track("screen_view", new { text = string.Concat(Enumerable.Repeat(text, 1700)), i });
+                for (var i = 0; i < 33; i += 1) krtu.Log(string.Concat(Enumerable.Repeat(text, 990)));
+                await krtu.ReportBugAsync(new BugReportInput { Category = "OTHER", Description = string.Concat(Enumerable.Repeat(text, 4000)) });
+                var result = await krtu.FlushAsync();
+                Assert.That(result.Bugs.Dropped, Is.Empty, $"kept, not refused for good ({text})");
+                Assert.That(result.Bugs.Sent, Is.EqualTo(1));
+                Assert.That(reports.Count, Is.EqualTo(1));
+                await krtu.ShutdownAsync();
+            }
         }
     }
 }

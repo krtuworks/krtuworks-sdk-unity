@@ -100,6 +100,9 @@ namespace Krtuworks.Internal
         const int EventChars = 1800;
         /// <summary>The server takes at most 100 KB of events; the SDK's own part stays under it so it never costs the player's report.</summary>
         const int EventsChars = 90_000;
+        /// <summary>The server's JSON body limit is 256 KiB in bytes, so the SDK's own parts also stay under byte budgets: multi-byte text (CJK, emoji) takes up to three bytes a character.</summary>
+        const int EventsBytes = 100_000;
+        const int LogBytes = 90_000;
         const int LogChars = 32_768;
         const int LogLine = 1000;
         const long RetryMs = 60_000;
@@ -117,10 +120,17 @@ namespace Krtuworks.Internal
         readonly Func<string?> subject;
         /// <summary>Tells the game a fix; false when no one listens (the fix then waits for the next look).</summary>
         readonly Func<BugReportView, bool> fixedTold;
-        readonly List<JObject> events = new List<JObject>();
-        readonly List<string> logLines = new List<string>();
+        /// <summary>The history is kept with the owner it was made under; a report takes only its own owner's.</summary>
+        sealed class Noted<T>
+        {
+            internal string Owner = "";
+            internal T Item = default!;
+        }
+
+        readonly List<Noted<JObject>> events = new List<Noted<JObject>>();
+        readonly List<Noted<string>> logLines = new List<Noted<string>>();
         int logChars;
-        double? lastFps;
+        Noted<double>? lastFps;
         /// <summary>Reports that wait before their next try (in memory: a new launch tries them all again).</summary>
         readonly Dictionary<string, long> waitUntil = new Dictionary<string, long>();
 
@@ -137,6 +147,9 @@ namespace Krtuworks.Internal
         static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         string Prefix(string who) => $"krtu:{opts.ClientId}:bugs:{who}:";
         string FixedKey(string who) => $"krtu:{opts.ClientId}:bugsFixed:{who}";
+
+        /// <summary>The bytes a value takes in the request body.</summary>
+        static int JsonBytes(JToken value) => Encoding.UTF8.GetByteCount(value.ToString(Formatting.None));
 
         static KrtuworksException Refused(string message) => new KrtuworksException("invalid_request", message, 400);
 
@@ -190,8 +203,14 @@ namespace Krtuworks.Internal
             }
             if (rate.HasValue) body["fps"] = Math.Round(rate.Value * 10, MidpointRounding.AwayFromZero) / 10;
             var kept = new JArray(events.Select(e => e.DeepClone()));
-            while (kept.Count > 0 && kept.ToString(Formatting.None).Length > EventsChars) kept.RemoveAt(0);
+            while (kept.Count > 0 && (kept.ToString(Formatting.None).Length > EventsChars || JsonBytes(kept) > EventsBytes)) kept.RemoveAt(0);
             if (kept.Count > 0) body["events"] = kept;
+            // The log keeps its newest lines.
+            while (log.Length > 0 && JsonBytes(new JValue(log)) > LogBytes)
+            {
+                var cut = log.IndexOf('\n');
+                log = cut < 0 ? "" : log.Substring(cut + 1);
+            }
             if (log.Length > 0) body["log"] = log;
             return body;
         }
@@ -215,11 +234,12 @@ namespace Krtuworks.Internal
             var entry = new JObject { ["type"] = e.Type, ["at"] = e.CreatedAt };
             if (e.Position != null) entry["position"] = JObject.FromObject(e.Position, JsonSerializer.Create(Json.Settings));
             if (e.Data != null && e.Data.ToString(Formatting.None).Length <= EventChars) entry["data"] = e.Data.DeepClone();
+            var who = owner();
             lock (events)
             {
-                events.Add(entry);
+                events.Add(new Noted<JObject> { Owner = who, Item = entry });
                 if (events.Count > RingEvents) events.RemoveAt(0);
-                if (e.Type == "performance" && e.Data?["fps"] is JValue fps && (fps.Type == JTokenType.Float || fps.Type == JTokenType.Integer)) lastFps = (double)fps;
+                if (e.Type == "performance" && e.Data?["fps"] is JValue fps && (fps.Type == JTokenType.Float || fps.Type == JTokenType.Integer)) lastFps = new Noted<double> { Owner = who, Item = (double)fps };
             }
         }
 
@@ -228,13 +248,14 @@ namespace Krtuworks.Internal
         {
             var text = message ?? "";
             var line = $"{Clock.IsoNow()} {(text.Length > LogLine ? text.Substring(0, LogLine) : text)}";
+            var who = owner();
             lock (logLines)
             {
-                logLines.Add(line);
+                logLines.Add(new Noted<string> { Owner = who, Item = line });
                 logChars += line.Length + 1;
                 while (logChars > LogChars && logLines.Count > 0)
                 {
-                    logChars -= logLines[0].Length + 1;
+                    logChars -= logLines[0].Item.Length + 1;
                     logLines.RemoveAt(0);
                 }
             }
@@ -258,10 +279,10 @@ namespace Krtuworks.Internal
             double? fps;
             lock (events)
             {
-                recent = events.ToList();
-                fps = lastFps;
+                recent = events.Where(e => e.Owner == who).Select(e => e.Item).ToList();
+                fps = lastFps != null && lastFps.Owner == who ? lastFps.Item : (double?)null;
             }
-            lock (logLines) log = string.Join("\n", logLines);
+            lock (logLines) log = string.Join("\n", logLines.Where(l => l.Owner == who).Select(l => l.Item));
             var body = ReportBody(input, reportId, opts, level, fps, recent, log);
             await Json.Put(store, Prefix(who) + reportId, new WaitingBug { ReportId = reportId, MadeAt = NowMs, Body = body, Screenshot = shot });
             var player = subject();
@@ -272,10 +293,19 @@ namespace Krtuworks.Internal
         /// <summary>Reports (with their screenshots) that wait on this device for the player, or for the first player.</summary>
         internal async Task<int> WaitingAsync() => (await store.KeysAsync(Prefix(owner()))).Count;
 
-        /// <summary>Hands one owner's waiting reports to another (the anonymous queue to the first player, a confirmed merge).</summary>
+        /// <summary>Hands one owner's waiting reports and history to another (the anonymous queue to the first player, a confirmed merge).</summary>
         internal async Task MoveAsync(string from, string to)
         {
             if (from == to) return;
+            lock (events)
+            {
+                foreach (var e in events.Where(e => e.Owner == from)) e.Owner = to;
+                if (lastFps != null && lastFps.Owner == from) lastFps.Owner = to;
+            }
+            lock (logLines)
+            {
+                foreach (var l in logLines.Where(l => l.Owner == from)) l.Owner = to;
+            }
             foreach (var key in await store.KeysAsync(Prefix(from)))
             {
                 var w = await Json.Get<WaitingBug>(store, key);

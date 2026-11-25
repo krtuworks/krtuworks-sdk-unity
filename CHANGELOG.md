@@ -4,6 +4,13 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.7 - 2026-11-25
+
+### Fixed
+- A bug report carries only its own player's recent events, log lines and frame rate. Before, after a switch to another account in the same run, the new player's report took the previous player's events and log lines too. What was recorded before anyone signed in goes to the first player, like the events queue.
+- A different player signed in by another tab or instance sharing the same storage is now taken up like a sign-in here: the identity change is reported and a session opens for that player. Before, the SDK switched to that player silently. A plain token refresh by another tab stays silent.
+- The events and log lines a bug report attaches are now limited in bytes, not characters, so a report in Chinese, Japanese or other multi-byte text stays under the server's size limit. Before, such a report could be refused as too large and dropped.
+
 ## 1.0.6 - 2026-11-25
 
 ### Fixed

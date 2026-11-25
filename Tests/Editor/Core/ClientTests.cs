@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using Krtuworks.Internal;
 using Newtonsoft.Json.Linq;
@@ -998,6 +999,70 @@ namespace Krtuworks.Tests
             await plain.ReadyAsync();
             Assert.That(server.Count("GET", "/v1/me/leaderboards"), Is.EqualTo(0), "a platform without leaderboards imports nothing");
             await plain.ShutdownAsync();
+        }
+
+        [Test]
+        public async Task AnotherFlowsDifferentPlayerTakenUpOnARefreshIsAnIdentityChange_ControlOnlyARefreshOfAIsSilent()
+        {
+            const string A = "pw_guest_aaaaaaaaaaaa";
+            const string B = "pw_other_bbbbbbbbbbbb";
+            foreach (var otherPlayer in new[] { true, false })
+            {
+                var server = new FakeServer();
+                server.GuestRoutes(A);
+                server.ConfigRoute(new JObject());
+                server.AcceptEvents(new List<JObject>());
+                var sessionFor = new List<string>();
+                server.On("POST", "/v1/sessions", call =>
+                {
+                    var token = (call.Header("authorization") ?? "").Replace("Bearer ", "");
+                    lock (sessionFor) sessionFor.Add((string)JObject.Parse(Encoding.UTF8.GetString(Ids.FromBase64Url(token.Split('.')[1])))["sub"]!);
+                    return new Reply { Status = 201, Json = new JObject { ["session"] = new JObject { ["id"] = $"ses_{sessionFor.Count.ToString().PadLeft(20, 'a')}", ["startedAt"] = Clock.IsoNow() }, ["heartbeatSeconds"] = 60, ["serverTime"] = Clock.IsoNow() } };
+                });
+                server.On("POST", "/v1/sessions/ses_aaaaaaaaaaaaaaaaaaaa/end", _ => FakeServer.Ok(new JObject()));
+                var store = new MemoryStore();
+                var tab1 = await KrtuworksClient.InitializeAsync(server.Options(store, extra: o => o.Sessions = true));
+                await tab1.SignInAsGuestAsync("2000-01-01", Terms);
+                await tab1.ReadyAsync();
+                Assert.That(sessionFor, Is.EqualTo(new[] { A }));
+                var changes = new List<(string Type, string? Subject)>();
+                tab1.IdentityChanged += c => { lock (changes) changes.Add((c.Type, c.Player?.Subject)); };
+                var first = true;
+                server.OnAsync("GET", "/v1/me/bug-reports", async _ =>
+                {
+                    if (!first) return FakeServer.Ok(new JObject { ["reports"] = new JArray(), ["serverTime"] = Clock.IsoNow() });
+                    first = false;
+                    // Another flow writes its tokens (B, or a fresher A) while this call is on its way; this one's token is then refused.
+                    var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 600;
+                    var subject = otherPlayer ? B : A;
+                    await Json.Put(store, "krtu:buried.test.native:tokens", new StoredTokens
+                    {
+                        Kind = "guest",
+                        Subject = subject,
+                        AccessToken = FakeServer.FakeJwt(new JObject { ["sub"] = subject, ["aud"] = "devapi", ["exp"] = exp, ["scope"] = "app:player", ["n"] = "tab2" }),
+                        AccessExpiresAt = exp * 1000,
+                        RefreshToken = "rt-tab2",
+                    });
+                    return new Reply { Status = 401, Json = new JObject { ["error"] = new JObject { ["code"] = "token_expired", ["message"] = "x" } } };
+                });
+                if (otherPlayer)
+                {
+                    var e = await AsyncAssert.ThrowsAsync<KrtuworksException>(() => tab1.MyBugReportsAsync());
+                    Assert.That(e!.Code, Is.EqualTo("context_changed"));
+                    await tab1.ReadyAsync();
+                    Assert.That(changes, Is.EqualTo(new[] { ("guest", (string?)B) }), "told exactly once, of B");
+                    Assert.That(tab1.Player?.Subject, Is.EqualTo(B));
+                    Assert.That(sessionFor, Is.EqualTo(new[] { A, B }), "B's session opened by the settle after the change");
+                }
+                else
+                {
+                    Assert.That(await tab1.MyBugReportsAsync(), Is.Empty);
+                    await tab1.ReadyAsync();
+                    Assert.That(changes, Is.Empty, "a plain refresh by another flow is silent");
+                    Assert.That(sessionFor, Is.EqualTo(new[] { A }));
+                }
+                await tab1.ShutdownAsync();
+            }
         }
     }
 }

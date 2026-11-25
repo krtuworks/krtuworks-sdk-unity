@@ -55,6 +55,12 @@ namespace Krtuworks.Tests
             return this;
         }
 
+        /// <summary>The handler a route has now (to wrap it).</summary>
+        internal Func<FakeCall, Task<Reply>> RouteFor(string method, string path)
+        {
+            lock (routes) return routes[$"{method} {path}"];
+        }
+
         internal FakeServer OnAsync(string method, string path, Func<FakeCall, Task<Reply>> handler)
         {
             lock (routes) routes[$"{method} {path}"] = handler;
