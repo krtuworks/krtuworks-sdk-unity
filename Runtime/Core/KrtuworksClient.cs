@@ -254,6 +254,14 @@ namespace Krtuworks
 
         public Player? Player => identity.Player;
 
+        /// <summary>The SDK's own store, for the small values the ready-made screens keep between launches.</summary>
+        internal IKrtuStore Store => store;
+
+        /// <summary>The SDK's wait: the ready-made screens wait through it too (no <c>Task.Delay</c> in WebGL).</summary>
+        internal Func<TimeSpan, CancellationToken, Task> Delay => options.Delay;
+
+        internal string IdOrigin => options.IdOrigin;
+
         public string Environment => options.Environment;
 
         /// <summary>GAME, MOBILE_APP, WEB_APP or DESKTOP_APP, from krtuworks-config.json.</summary>

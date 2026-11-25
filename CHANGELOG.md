@@ -4,6 +4,15 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.5 - 2026-11-25
+
+### Added
+- Ready-made screens (`KrtuworksUnity.CreateUi()`, UI Toolkit, Unity 2022.3 and later): `await ui.EnsurePlayerAsync()` shows the age and terms screen before a new guest, a screen for players under 13 (the game goes on offline and the screen is not shown again until their 13th birthday), the screen for newer terms and an error screen with Try again and Keep playing. `ui.SignInAsync()` signs in the way the platform does: on a computer the system browser with a "Finish signing in in your browser" screen (Open the page again, Cancel), on iOS and Android the system's own sheet, on a console a code screen with the address, the QR of the complete address, a countdown and New code; backing out is a cancelled result, not an error. `ui.SaveAsync(slot, bytes, baseVersion, name)` shows both saves when another device saved first and does what the player picks (`DescribeSave` adds the game's own chapter, play time or picture to each card), and `ResolveMergedSavesAsync()` asks about the slots two merged accounts both hold. With Steam, a Steam Cloud copy that differs from the server's shows the two saves too (`PlatformSaveConflicts`). A guest gets the "link a Krtuworks ID" prompt in a corner when the SDK says it is time. `<KrtuworksSignInButton>` and `<KrtuworksAccountChip>` are a sign-in button and an account chip with its menu, for UXML or code. Every screen works with a gamepad and a keyboard, and consoles show the controller hints. Colours, corners and the backdrop are USS custom properties (`--kw-accent` ...) on `.kw-root` that a game's own style sheet overrides, every sentence can be replaced (`Texts`), and a game that draws its own screens implements `IUiHost` and gets the same models from `KrtuworksUi`. A WebGL build offers no sign-in (guests play).
+
+### Fixed
+- `KrtuworksUnity.SignInAsync` on a console tried to open the system browser, which consoles do not have. It now throws `NotSupportedException` that points to `StartDeviceLinkAsync` and the ready-made screens.
+- An Xbox One build (`RuntimePlatform.XboxOne`) was reported as WINDOWS; it is now XBOX.
+
 ## 1.0.4 - 2026-11-22
 
 ### Fixed

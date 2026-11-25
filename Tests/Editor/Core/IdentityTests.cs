@@ -294,7 +294,7 @@ namespace Krtuworks.Tests
             await AsyncAssert.ThrowsAsync<SocketException>(async () => await Get(port, "/callback"), "control: nothing listens any more");
         }
 
-        static async Task<string> Get(int port, string path)
+        internal static async Task<string> Get(int port, string path)
         {
             using var client = new TcpClient();
             await client.ConnectAsync("127.0.0.1", port);

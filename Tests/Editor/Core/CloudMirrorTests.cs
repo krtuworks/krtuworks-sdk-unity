@@ -29,7 +29,7 @@ namespace Krtuworks.Tests
             Assert.That(CloudMirror.Decide("SETTINGS", "a", "b", null, false), Is.EqualTo(MirrorStep.ToPlatform), "control: the server's is the later one");
         }
 
-        sealed class FakeCloud : IPlatformServices, IPlatformCloud
+        internal sealed class FakeCloud : IPlatformServices, IPlatformCloud
         {
             internal bool On = true;
             internal long? Free = 1_000_000;
@@ -58,7 +58,7 @@ namespace Krtuworks.Tests
         }
 
         /// <summary>The app's slots as the server keeps them: the current version, the one waiting for a choice.</summary>
-        sealed class Slot
+        internal sealed class Slot
         {
             internal string Kind = "SAVE";
             internal bool Mirror = true;
@@ -79,7 +79,7 @@ namespace Krtuworks.Tests
 
         static string Id(string key, int gen) => $"fil_{key.Replace("-", "")}{gen}".PadRight(24, '0');
 
-        static void SlotRoutes(FakeServer server, Dictionary<string, Slot> slots)
+        internal static void SlotRoutes(FakeServer server, Dictionary<string, Slot> slots)
         {
             JToken? Current(string key, Slot s) => s.Text == null ? null : Version(key, Id(key, s.Gen), s.Gen, s.Text, s.SavedAt);
             JToken? Waiting(string key, Slot s) => s.Waiting == null ? null : Version(key, Id(key, s.WaitingGen) + "w", s.WaitingGen, s.Waiting, "2026-11-08T11:00:00.000Z", "STEAM");
@@ -144,7 +144,7 @@ namespace Krtuworks.Tests
             }
         }
 
-        static async Task<KrtuworksClient> Start(FakeServer server, FakeCloud cloud, Dictionary<string, Slot> slots, List<JObject>? events = null, string link = "ACTIVE", List<PlatformSaveConflict>? told = null)
+        internal static async Task<KrtuworksClient> Start(FakeServer server, FakeCloud cloud, Dictionary<string, Slot> slots, List<JObject>? events = null, string link = "ACTIVE", List<PlatformSaveConflict>? told = null, Action<KrtuworksClient>? beforeSignIn = null)
         {
             server.GuestRoutes();
             server.ConfigRoute(new JObject());
@@ -168,6 +168,7 @@ namespace Krtuworks.Tests
                 o.PlatformServices = cloud;
             }));
             if (told != null) krtu.PlatformSaveConflict += told.Add;
+            beforeSignIn?.Invoke(krtu);
             await krtu.SignInAsGuestAsync("2000-01-01", Terms);
             await krtu.ReadyAsync();
             await krtu.SyncPlatformFilesAsync();

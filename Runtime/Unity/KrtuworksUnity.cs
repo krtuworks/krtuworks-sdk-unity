@@ -28,7 +28,7 @@ namespace Krtuworks.Unity
     /// the app's life (pause, quit, network). <c>await KrtuworksUnity.InitializeAsync();</c> then
     /// <see cref="Client"/> anywhere.
     /// </summary>
-    public static class KrtuworksUnity
+    public static partial class KrtuworksUnity
     {
         static Task<KrtuworksClient>? starting;
 
@@ -131,8 +131,9 @@ namespace Krtuworks.Unity
         /// <summary>
         /// Signs the player in with Krtuworks ID the way the platform does it: the system browser with a
         /// loopback return on desktops, the platform's authentication session on phones (iOS
-        /// ASWebAuthenticationSession; Android the browser and the app's scheme). Consoles use
-        /// <see cref="KrtuworksClient.StartDeviceLinkAsync"/>. A guest playing here is carried along.
+        /// ASWebAuthenticationSession; Android the browser and the app's scheme). A console has no browser and throws
+        /// <see cref="NotSupportedException"/>: it signs in with a code, through <see cref="KrtuworksClient.StartDeviceLinkAsync"/> or the
+        /// ready-made screens (<see cref="CreateUi"/>). A guest playing here is carried along.
         /// </summary>
         public static Task<Player> SignInAsync(CancellationToken cancel = default)
         {
@@ -144,8 +145,32 @@ namespace Krtuworks.Unity
                     return client.SignInWithAppAsync(MobileSignIn.AuthenticateAsync, cancel);
                 case RuntimePlatform.WebGLPlayer:
                     throw new NotSupportedException("A WebGL build signs in with the JS SDK (@krtuworks/sdk) on its page; guests play here.");
+                case RuntimePlatform.PS4:
+                case RuntimePlatform.PS5:
+                case RuntimePlatform.XboxOne:
+                case RuntimePlatform.GameCoreXboxOne:
+                case RuntimePlatform.GameCoreXboxSeries:
+                case RuntimePlatform.Switch:
+                    throw new NotSupportedException("A console has no web browser: sign in with a code on another device through KrtuworksClient.StartDeviceLinkAsync, or use the ready-made screens (KrtuworksUnity.CreateUi).");
                 default:
                     return client.SignInWithBrowserAsync(Application.OpenURL, cancel);
+            }
+        }
+
+        /// <summary>Consoles have no web browser: they sign in with a code on another device.</summary>
+        static bool IsConsole(RuntimePlatform platform)
+        {
+            switch (platform)
+            {
+                case RuntimePlatform.PS4:
+                case RuntimePlatform.PS5:
+                case RuntimePlatform.XboxOne:
+                case RuntimePlatform.GameCoreXboxOne:
+                case RuntimePlatform.GameCoreXboxSeries:
+                case RuntimePlatform.Switch:
+                    return true;
+                default:
+                    return false;
             }
         }
 
@@ -173,6 +198,7 @@ namespace Krtuworks.Unity
                 case RuntimePlatform.PS4:
                 case RuntimePlatform.PS5:
                     return "PLAYSTATION";
+                case RuntimePlatform.XboxOne:
                 case RuntimePlatform.GameCoreXboxOne:
                 case RuntimePlatform.GameCoreXboxSeries:
                     return "XBOX";
@@ -194,6 +220,7 @@ namespace Krtuworks.Unity
                 case RuntimePlatform.WebGLPlayer: return "Web";
                 case RuntimePlatform.PS4:
                 case RuntimePlatform.PS5: return "PlayStation";
+                case RuntimePlatform.XboxOne:
                 case RuntimePlatform.GameCoreXboxOne:
                 case RuntimePlatform.GameCoreXboxSeries: return "Xbox";
                 case RuntimePlatform.Switch: return "Nintendo Switch";

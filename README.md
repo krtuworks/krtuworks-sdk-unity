@@ -12,6 +12,16 @@ or from [OpenUPM](https://openupm.com): `openupm add com.krtuworks.sdk`.
 
 Save your app's `krtuworks-config.json` (the app's Credentials page in the [partner console](https://partner.krtuworks.com)) as `Assets/Resources/krtuworks-config.json`, then call `await KrtuworksUnity.InitializeAsync()` once when the game starts.
 
+Ready-made screens for the age question, sign-in on every platform, the account chip and save conflicts:
+
+```csharp
+await KrtuworksUnity.InitializeAsync();
+var ui = KrtuworksUnity.CreateUi();
+await ui.EnsurePlayerAsync(); // the age screen for a new guest, then the game starts
+```
+
+Add `<krtuworks:KrtuworksSignInButton />` or `<krtuworks:KrtuworksAccountChip />` (with `xmlns:krtuworks="Krtuworks.Unity"`) to a UI document wherever the game wants them. Colours are the `--kw-*` custom properties of `.kw-root`.
+
 - Documentation: [partner.krtuworks.com/docs](https://partner.krtuworks.com/docs)
 - Coding agents: [`AGENTS.md`](AGENTS.md)
 - Changes: [`CHANGELOG.md`](CHANGELOG.md)
