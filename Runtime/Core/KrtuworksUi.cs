@@ -316,9 +316,11 @@ namespace Krtuworks
         /// <summary>Two saves of <paramref name="slot"/>: this device's <paramref name="bytes"/> and the server's <paramref name="current"/>.</summary>
         public async Task<SaveChoice> ChooseSaveAsync(string slot, byte[] bytes, FileVersion current, string? name = null)
         {
+            var owner = client.Player?.Subject;
             for (;;)
             {
                 var read = await ReadSlotAsync(slot);
+                AssertSamePlayer(owner);
                 if (read?.VersionId == null) return new SaveChoice(SaveKept.Here, await client.SaveFileAsync(slot, bytes, null));
                 var there = new FileVersion
                 {
@@ -341,6 +343,7 @@ namespace Krtuworks
                 hereCard.Newer = IsNewer(moment, there.SavedAt, true);
                 thereCard.Newer = !hereCard.Newer;
                 var answer = await Once(new ConflictScreen { Slot = name ?? slot, Cards = new[] { hereCard, thereCard } });
+                AssertSamePlayer(owner);
                 if (answer.Kind == UiAnswerKind.Keep && answer.Card == 1) return new SaveChoice(SaveKept.There, there, read.Bytes);
                 try
                 {
@@ -356,22 +359,32 @@ namespace Krtuworks
         /// <summary>After two accounts were merged: every slot holding two versions asks the player which to keep.</summary>
         public async Task<List<ResolvedSave>> ResolveMergedSavesAsync()
         {
+            var owner = client.Player?.Subject;
             var list = await client.ListFilesAsync();
+            AssertSamePlayer(owner);
             var resolved = new List<ResolvedSave>();
             foreach (var slot in list.Slots)
             {
                 // The platform cloud's waiting copy has its own prompt (PlatformSaveConflict).
                 if (slot.Conflict == null || slot.File == null || slot.Conflict.PlatformCloud != null) continue;
                 var read = await ReadSlotAsync(slot.Key);
+                AssertSamePlayer(owner);
                 var currentCard = Card(Texts.Get("conflict.current"), slot.File.SavedAt, slot.File.SizeBytes, slot.Key, read?.Bytes);
                 var mergedCard = Card(Texts.Get("conflict.merged"), slot.Conflict.SavedAt, slot.Conflict.SizeBytes, slot.Key, null);
                 mergedCard.Newer = IsNewer(slot.Conflict.SavedAt, slot.File.SavedAt);
                 currentCard.Newer = !mergedCard.Newer;
                 var answer = await Once(new ConflictScreen { Slot = string.IsNullOrEmpty(slot.Name) ? slot.Key : slot.Name, Cards = new[] { currentCard, mergedCard } });
+                AssertSamePlayer(owner);
                 var keep = answer.Kind == UiAnswerKind.Keep && answer.Card == 1 ? slot.Conflict : slot.File;
                 resolved.Add(new ResolvedSave { Slot = slot.Key, Kept = await client.ResolveFileAsync(slot.Key, keep.Id, slot.File.Id) });
             }
             return resolved;
+        }
+
+        /// <summary>The player who opened a save screen is the one who answers it; otherwise their bytes or choice would reach another account.</summary>
+        void AssertSamePlayer(string? owner)
+        {
+            if (client.Player?.Subject != owner) throw new KrtuworksException("context_changed", "The player changed while the save screen was open; nothing was saved.");
         }
 
         /// <summary>The slot as the server has it; null when it has no version.</summary>
@@ -413,25 +426,30 @@ namespace Krtuworks
 
         void OnPlatformSaveConflict(PlatformSaveConflict conflict)
         {
-            lock (platformGate) platformQueue = QueuePlatformConflict(platformQueue, conflict);
+            var owner = client.Player?.Subject;
+            lock (platformGate) platformQueue = QueuePlatformConflict(platformQueue, conflict, owner);
         }
 
         /// <summary>One at a time: the next waits for the player's choice on the one before.</summary>
-        async Task QueuePlatformConflict(Task previous, PlatformSaveConflict conflict)
+        async Task QueuePlatformConflict(Task previous, PlatformSaveConflict conflict, string? owner)
         {
             await previous;
-            await Background(() => ResolvePlatformConflictAsync(conflict), "ui_platform_conflict");
+            await Background(() => ResolvePlatformConflictAsync(conflict, owner), "ui_platform_conflict");
         }
 
-        internal async Task ResolvePlatformConflictAsync(PlatformSaveConflict conflict)
+        /// <summary>The copy belongs to the player it was found for: another player never sees it nor answers it (the copy keeps waiting on the server for its player).</summary>
+        internal async Task ResolvePlatformConflictAsync(PlatformSaveConflict conflict, string? owner)
         {
+            if (client.Player?.Subject != owner) return;
             var read = await ReadSlotAsync(conflict.Slot);
+            if (client.Player?.Subject != owner) return;
             var platform = conflict.Platform.PlatformCloud ?? conflict.Platform.Platform ?? "";
             var currentCard = Card(Texts.Get("conflict.current"), conflict.Server.SavedAt, conflict.Server.SizeBytes, conflict.Slot, read?.Bytes);
             var cloudCard = Card(Texts.Get("conflict.cloud", ("platform", PlatformName(platform))), conflict.Platform.SavedAt, conflict.PlatformData?.Length ?? conflict.Platform.SizeBytes, conflict.Slot, conflict.PlatformData);
             cloudCard.Newer = IsNewer(conflict.Platform.SavedAt, conflict.Server.SavedAt);
             currentCard.Newer = !cloudCard.Newer;
             var answer = await Once(new ConflictScreen { Slot = conflict.Slot, Cards = new[] { currentCard, cloudCard } });
+            if (client.Player?.Subject != owner) return;
             var keep = answer.Kind == UiAnswerKind.Keep && answer.Card == 1 ? conflict.Platform : conflict.Server;
             await client.ResolveFileAsync(conflict.Slot, keep.Id, conflict.Server.Id);
         }

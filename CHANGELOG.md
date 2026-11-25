@@ -4,6 +4,12 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.6 - 2026-11-25
+
+### Fixed
+- The save screens answer only for the player who opened them. Before, when the player signed out or another account signed in while the "which save to keep" screen was open, the choice and the save could reach the new account. Now `SaveAsync`, `ChooseSaveAsync` and `ResolveMergedSavesAsync` end with `context_changed` and nothing is saved, and the Steam Cloud screen is dropped: the copy waits for its own player.
+- On Android, a key kept unsealed because the Android Keystore failed once stayed unsealed for good. Now every launch seals the same key again once the Keystore works, and the saved sign-in stays. Before Android 6.0 there is no Keystore and the key stays as it was.
+
 ## 1.0.5 - 2026-11-25
 
 ### Added

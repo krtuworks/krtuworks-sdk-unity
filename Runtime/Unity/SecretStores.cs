@@ -60,7 +60,8 @@ namespace Krtuworks.Unity
     /// <summary>
     /// Android: the sealing key encrypted by an AES key that never leaves the Android Keystore
     /// (Plugins/Android/KrtuworksKeystore.java), kept in the no-backup folder. Restored onto another phone
-    /// it cannot be opened (the Keystore key is not there), so the SDK starts as a new device.
+    /// it cannot be opened (the Keystore key is not there), so the SDK starts as a new device. Where sealing
+    /// fails the key is kept as `plain:` text and sealed on a later launch (<see cref="KeystoreKeyFile"/>).
     /// </summary>
     public sealed class AndroidKeystoreMasterKey : IMasterKey
     {
@@ -71,25 +72,10 @@ namespace Krtuworks.Unity
             this.path = path;
         }
 
-        /// <summary>Marks a key kept as it is: Android before 6.0 has no Keystore AES (the folder is still private and never backed up).</summary>
-        const string Plain = "plain:";
-
         public byte[]? GetOrCreate()
         {
             using var keystore = new AndroidJavaClass("com.krtuworks.sdk.KrtuworksKeystore");
-            if (File.Exists(path))
-            {
-                var kept = File.ReadAllText(path);
-                var opened = kept.StartsWith(Plain, StringComparison.Ordinal) ? kept.Substring(Plain.Length) : keystore.CallStatic<string>("open", kept);
-                // null: the Keystore failed just now. Making a new key would orphan every sealed secret; wait instead.
-                if (opened == null) return null;
-                if (opened.Length > 0) return Convert.FromBase64String(opened);
-            }
-            var key = Internal.Ids.RandomBytes(32);
-            var sealedKey = keystore.CallStatic<string>("seal", Convert.ToBase64String(key));
-            if (string.IsNullOrEmpty(sealedKey)) sealedKey = Plain + Convert.ToBase64String(key);
-            Internal.AtomicFile.Write(path, System.Text.Encoding.ASCII.GetBytes(sealedKey));
-            return key;
+            return KeystoreKeyFile.Resolve(path, text => keystore.CallStatic<string>("open", text), secret => keystore.CallStatic<string>("seal", secret));
         }
     }
 

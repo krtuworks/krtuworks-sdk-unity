@@ -358,6 +358,58 @@ namespace Krtuworks.Tests
         }
 
         [Test]
+        public async Task ThePlayerSignsOutWhileTheConflictScreenIsOpen_NothingIsReturnedOrSavedAndTheCallEndsContextChanged_ControlTheSamePlayerGetsTheChosenBytes()
+        {
+            foreach (var changes in new[] { true, false })
+            {
+                var server = new FakeServer();
+                server.GuestRoutes();
+                server.On("POST", "/oidc/token/revocation", _ => new Reply { Status = 200 });
+                var theirs = new JObject
+                {
+                    ["id"] = "fil_bbbbbbbbbbbbbbbbbbbb", ["slot"] = "save-1", ["device"] = null, ["generation"] = 4, ["sizeBytes"] = 3, ["sha256"] = "",
+                    ["platform"] = "STEAM", ["build"] = "1.0.0", ["savedAt"] = "2026-06-01T11:00:00Z", ["fromMerge"] = false,
+                };
+                var writes = 0;
+                server.On("GET", "/v1/apps/buried/files/save-1", _ =>
+                {
+                    var reply = new Reply { Body = new byte[] { 9, 9, 9 } };
+                    reply.Headers["etag"] = "\"fil_bbbbbbbbbbbbbbbbbbbb\"";
+                    reply.Headers["x-krtu-generation"] = "4";
+                    reply.Headers["x-krtu-saved-at"] = "2026-06-01T11:00:00Z";
+                    return reply;
+                });
+                server.On("PUT", "/v1/apps/buried/files/save-1", _ =>
+                {
+                    writes++;
+                    return new Reply { Status = 201, Json = new JObject { ["file"] = theirs } };
+                });
+                var krtu = await Start(server);
+                await krtu.SignInAsGuestAsync("2000-01-01", KrtuworksClient.CurrentTerms);
+                await krtu.ReadyAsync();
+                var host = Manual();
+                var ui = new KrtuworksUi(krtu, host, Opts());
+                var run = ui.ChooseSaveAsync("save-1", new byte[] { 1, 2 }, theirs.ToObject<FileVersion>()!);
+                while (host.Shown.Count == 0) await Task.Delay(5);
+                if (changes) await krtu.SignOutAsync();
+                host.Dialogs[0].Answers.Post(UiAnswer.Keep(1));
+                if (changes)
+                {
+                    var err = await AsyncAssert.ThrowsAsync<KrtuworksException>(() => run);
+                    Assert.That(err.Code, Is.EqualTo("context_changed"));
+                    Assert.That(writes, Is.EqualTo(0), "nothing saved for the other player");
+                }
+                else
+                {
+                    var result = await run;
+                    Assert.That(result.Kept, Is.EqualTo(SaveKept.There));
+                    Assert.That(result.Bytes, Is.EqualTo(new byte[] { 9, 9, 9 }));
+                }
+                await krtu.ShutdownAsync();
+            }
+        }
+
+        [Test]
         public async Task AMergedAccountsSlotsAskWhichToKeep_ControlASlotWithNoWaitingVersionAsksNothing()
         {
             var server = new FakeServer();
@@ -778,6 +830,48 @@ namespace Krtuworks.Tests
                 await Until(() => keep == 1 ? slots["save-1"].Text == "steam" : cloud.Text("save-1") == "server", "the choice was applied");
                 Assert.That(slots["save-1"].Text, Is.EqualTo(keep == 1 ? "steam" : "server"));
                 ui!.Dispose();
+                await krtu.ShutdownAsync();
+            }
+        }
+
+        [Test]
+        public async Task ThePlayerSignsOutWhileTheCloudConflictScreenIsOpen_NothingIsResolved_ControlTheSamePlayersChoiceIsResolved()
+        {
+            foreach (var changes in new[] { true, false })
+            {
+                var server = new FakeServer();
+                server.GuestRoutes();
+                server.On("POST", "/oidc/token/revocation", _ => new Reply { Status = 200 });
+                server.On("GET", "/v1/apps/buried/files/save-1", _ =>
+                {
+                    var reply = new Reply { Body = new byte[] { 1, 2, 3 } };
+                    reply.Headers["etag"] = "\"fil_server00000000000000\"";
+                    return reply;
+                });
+                var resolves = 0;
+                server.On("POST", "/v1/apps/buried/files/save-1/resolve", _ =>
+                {
+                    resolves++;
+                    return new Reply { Json = new JObject { ["file"] = new JObject { ["id"] = "fil_cloud000000000000000", ["slot"] = "save-1", ["generation"] = 4, ["sizeBytes"] = 4, ["savedAt"] = "2026-06-01T11:30:00Z" } } };
+                });
+                var krtu = await Start(server);
+                await krtu.SignInAsGuestAsync("2000-01-01", KrtuworksClient.CurrentTerms);
+                await krtu.ReadyAsync();
+                var host = Manual();
+                var ui = new KrtuworksUi(krtu, host, Opts());
+                var conflict = new PlatformSaveConflict
+                {
+                    Slot = "save-1",
+                    Server = new FileVersion { Id = "fil_server00000000000000", Slot = "save-1", Generation = 3, SizeBytes = 3, SavedAt = "2026-06-01T10:00:00Z" },
+                    Platform = new FileVersion { Id = "fil_cloud000000000000000", Slot = "save-1", Generation = 4, SizeBytes = 4, SavedAt = "2026-06-01T11:30:00Z", PlatformCloud = "STEAM" },
+                    PlatformData = new byte[] { 4, 5, 6, 7 },
+                };
+                var run = ui.ResolvePlatformConflictAsync(conflict, krtu.Player?.Subject);
+                while (host.Shown.Count == 0) await Task.Delay(5);
+                if (changes) await krtu.SignOutAsync();
+                host.Dialogs[0].Answers.Post(UiAnswer.Keep(1));
+                await run;
+                Assert.That(resolves, Is.EqualTo(changes ? 0 : 1), changes ? "the copy keeps waiting for its own player" : "the same player's choice is resolved");
                 await krtu.ShutdownAsync();
             }
         }

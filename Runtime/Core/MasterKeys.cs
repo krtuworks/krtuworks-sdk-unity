@@ -121,6 +121,54 @@ namespace Krtuworks
     }
 }
 
+namespace Krtuworks
+{
+    /// <summary>
+    /// The Android key file's decisions, apart from the Java bridge so they run without Android: open the kept key, upgrade a
+    /// `plain:` one, or make a new one. `open` and `seal` are KrtuworksKeystore's: open returns null when the Keystore failed
+    /// just now and "" when the text can never open here; seal returns null when it cannot seal (Android before 6.0, or a refusal).
+    /// </summary>
+    internal static class KeystoreKeyFile
+    {
+        /// <summary>
+        /// Marks a key kept as it is because sealing failed (or Android before 6.0 cannot seal): the folder is still private and
+        /// never backed up. Temporary: every launch seals it again once the Keystore works, so it stays plain only where sealing never works.
+        /// </summary>
+        internal const string Plain = "plain:";
+
+        internal static byte[]? Resolve(string path, Func<string, string?> open, Func<string, string?> seal)
+        {
+            if (File.Exists(path))
+            {
+                var kept = File.ReadAllText(path);
+                var plain = kept.StartsWith(Plain, StringComparison.Ordinal);
+                // null: the Keystore failed just now. Making a new key would orphan every sealed secret; wait instead.
+                var opened = plain ? kept.Substring(Plain.Length) : open(kept);
+                if (opened == null) return null;
+                if (opened.Length > 0)
+                {
+                    if (plain) TrySeal(path, opened, seal);
+                    return Convert.FromBase64String(opened);
+                }
+            }
+            var key = Ids.RandomBytes(32);
+            var encoded = Convert.ToBase64String(key);
+            var sealedKey = seal(encoded);
+            AtomicFile.Write(path, Encoding.ASCII.GetBytes(string.IsNullOrEmpty(sealedKey) ? Plain + encoded : sealedKey));
+            return key;
+        }
+
+        /// <summary>The same key, sealed now; the file is left as it was when sealing still fails or the file cannot be written.</summary>
+        static void TrySeal(string path, string encoded, Func<string, string?> seal)
+        {
+            var sealedKey = seal(encoded);
+            if (string.IsNullOrEmpty(sealedKey)) return;
+            try { AtomicFile.Write(path, Encoding.ASCII.GetBytes(sealedKey)); }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { }
+        }
+    }
+}
+
 namespace Krtuworks.Internal
 {
     internal static class AtomicFile

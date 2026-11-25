@@ -98,5 +98,43 @@ namespace Krtuworks.Tests
             Assert.That(other, Is.Not.EqualTo(a));
             Assert.That(File.Exists(Path.Combine(dir, "k")), Is.False, "nothing written when the machine has an id");
         }
+
+        // ── The Android key file ─────────────────────────────────────────────
+
+        static string? FakeSeal(string secret) => $"sealed({secret})";
+        static string? FakeOpen(string text) => text.StartsWith("sealed(", StringComparison.Ordinal) ? text.Substring(7, text.Length - 8) : "";
+
+        [Test]
+        public void AKeyKeptPlainBecauseSealingFailedIsSealedOnALaterLaunchAsTheSameKey_ControlAKeyAlreadySealedIsOpenedAndLeftAlone()
+        {
+            var path = Path.Combine(dir, "secrets.key");
+            var first = KeystoreKeyFile.Resolve(path, FakeOpen, _ => null)!;
+            Assert.That(File.ReadAllText(path), Does.StartWith("plain:"), "sealing failed: the key is kept as it is");
+
+            Assert.That(KeystoreKeyFile.Resolve(path, FakeOpen, _ => null), Is.EqualTo(first), "still failing: the same plain key, nothing thrown, no new key");
+            Assert.That(File.ReadAllText(path), Does.StartWith("plain:"));
+
+            Assert.That(KeystoreKeyFile.Resolve(path, FakeOpen, FakeSeal), Is.EqualTo(first), "sealing works now: the same key");
+            Assert.That(File.ReadAllText(path), Is.EqualTo($"sealed({Convert.ToBase64String(first)})"));
+
+            var sealCalls = 0;
+            Assert.That(KeystoreKeyFile.Resolve(path, FakeOpen, secret => { sealCalls++; return FakeSeal(secret); }), Is.EqualTo(first), "control: a sealed key opens as the same key");
+            Assert.That(sealCalls, Is.EqualTo(0), "and is not sealed again");
+            Assert.That(File.ReadAllText(path), Is.EqualTo($"sealed({Convert.ToBase64String(first)})"));
+        }
+
+        [Test]
+        public void TheKeystoreFailingWhileOpeningWaitsInsteadOfMakingAKey_ControlAKeyThatCanNeverOpenHereIsReplaced()
+        {
+            var path = Path.Combine(dir, "secrets.key");
+            var first = KeystoreKeyFile.Resolve(path, FakeOpen, FakeSeal)!;
+            var kept = File.ReadAllText(path);
+            Assert.That(KeystoreKeyFile.Resolve(path, _ => null, FakeSeal), Is.Null);
+            Assert.That(File.ReadAllText(path), Is.EqualTo(kept), "the file is untouched");
+
+            var other = KeystoreKeyFile.Resolve(path, _ => "", FakeSeal)!;
+            Assert.That(other, Is.Not.EqualTo(first), "restored from another phone: a new key");
+            Assert.That(File.ReadAllText(path), Is.Not.EqualTo(kept));
+        }
     }
 }
