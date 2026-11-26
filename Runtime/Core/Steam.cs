@@ -102,7 +102,7 @@ namespace Krtuworks
     /// ticket for the `krtuworks-id` identity (the Steam guest and every session's licence check), the achievements, the stats,
     /// the Steam Cloud files, the player's own row of a Steam leaderboard (read only), Steam rich presence and the Steam client's own ownership answer for a DLC.
     /// </summary>
-    public sealed class SteamAchievementSync : IPlatformServices, IPlatformStats, IPlatformCloud, IPlatformLeaderboards, IPlatformPresence, IPlatformOwnership
+    public sealed class SteamAchievementSync : IPlatformServices, IPlatformStats, IPlatformCloud, IPlatformLeaderboards, IPlatformPresence, IPlatformOwnership, IPlatformTicketCancel
     {
         const string TicketIdentity = "krtuworks-id";
 
@@ -112,6 +112,9 @@ namespace Krtuworks
         readonly ISteamBackend steam;
         readonly int ticketWaitMs;
         readonly Dictionary<uint, TaskCompletionSource<string?>> waiting = new Dictionary<uint, TaskCompletionSource<string?>>();
+        /// <summary>The tickets handed out and not yet cancelled, by their hex text (the newest few).</summary>
+        readonly Dictionary<string, uint> issued = new Dictionary<string, uint>();
+        const int IssuedKept = 8;
 
         public SteamAchievementSync(ISteamBackend steam, int ticketWaitMs = DefaultTicketWaitMs)
         {
@@ -131,7 +134,20 @@ namespace Krtuworks
             var ticket = first == answer.Task ? answer.Task.Result : null;
             // A ticket that came too late, was refused or came back empty is never sent: cancel it so it is not left valid.
             if (ticket == null) steam.CancelAuthTicket(handle);
+            else
+            {
+                if (issued.Count >= IssuedKept) issued.Clear();
+                issued[ticket] = handle;
+            }
             return ticket;
+        }
+
+        /// <summary>A ticket this class handed out that was never sent: Steam stops honouring it.</summary>
+        public void CancelWebApiTicket(string ticket)
+        {
+            if (!issued.TryGetValue(ticket, out var handle)) return;
+            issued.Remove(ticket);
+            steam.CancelAuthTicket(handle);
         }
 
         /// <summary>

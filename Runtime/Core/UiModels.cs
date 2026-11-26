@@ -91,6 +91,8 @@ namespace Krtuworks
                         message += " " + texts.Get("error.bannedUntil", ("date", UiFormat.LongDate(endsAt, locale)));
                     return new ErrorScreen { Message = message, Retry = false };
                 }
+                case "account_deletion_pending":
+                    return new ErrorScreen { Message = texts.Get("error.deletionPending"), Retry = false };
                 case "guest_limit":
                 case "guest_capacity":
                     return new ErrorScreen { Message = texts.Get("error.busy"), Retry = true };

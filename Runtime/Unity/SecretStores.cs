@@ -36,7 +36,7 @@ namespace Krtuworks.Unity
                 case RuntimePlatform.WebGLPlayer:
                     return new BrowserSecretStore(Path.Combine(root, "secrets"));
                 default:
-                    // Linux and Steam Deck: one way for desktop and game mode alike (the owner's choice).
+                    // Linux and Steam Deck: one way for desktop and game mode alike.
                     return new SealedFileStore(Path.Combine(root, "secrets"), new MachineBoundMasterKey(appId, Path.Combine(root, "secrets.key")));
             }
         }
@@ -112,7 +112,9 @@ namespace Krtuworks.Unity
 
         public Task DeleteAsync(string key)
         {
-            KrtuKeychainDelete(service, key);
+            // A token the Keychain would not delete (it is locked) must not look signed out: it would come back at the next launch.
+            var status = KrtuKeychainDelete(service, key);
+            if (status != 0) throw new KrtuworksException("secret_storage_unavailable", $"The Keychain refused to delete the item ({status}).");
             return Task.CompletedTask;
         }
 

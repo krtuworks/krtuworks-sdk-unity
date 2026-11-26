@@ -81,6 +81,7 @@ namespace Krtuworks
             ["error.offline"] = "No connection to Krtuworks. Your game keeps going; we'll try again when you're back online.",
             ["error.cancelled"] = "Sign-in was cancelled.",
             ["error.banned"] = "You can't play this game online.",
+            ["error.deletionPending"] = "This account is waiting to be deleted. Open your account page to cancel the deletion or download your data.",
             ["error.bannedReason"] = "You can't play this game online: {reason}",
             ["error.bannedUntil"] = "This ends on {date}.",
             ["error.maintenance"] = "Online features are down for maintenance.",

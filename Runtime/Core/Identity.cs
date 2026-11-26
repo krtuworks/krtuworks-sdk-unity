@@ -24,7 +24,10 @@ namespace Krtuworks
         public string? Picture;
     }
 
-    /// <summary>signed_in · guest · signed_out · merged · deletion_pending · sanctioned</summary>
+    /// <summary>
+    /// signed_in · guest · signed_out (`Reason` `account_deleted` when the server said the account is gone) · merged · deletion_pending · sanctioned ·
+    /// merging (the server answered 409 `account_merging` to this player's call: told once per episode) · merging_ended (the first call answered after it)
+    /// </summary>
     public sealed class IdentityChange
     {
         public string Type = "";
@@ -167,8 +170,28 @@ namespace Krtuworks.Internal
         {
             if (next != null) await Json.Put(secrets, Key("tokens"), next);
             else await secrets.DeleteAsync(Key("tokens"));
-            if (tokens?.Subject != next?.Subject) Generation++;
+            if (tokens?.Subject != next?.Subject)
+            {
+                Generation++;
+                merging = false;
+            }
             tokens = next;
+        }
+
+        bool merging;
+
+        /// <summary>True while the server answers this player's calls with `account_merging`.</summary>
+        internal bool Merging => merging;
+
+        /// <summary>
+        /// The server's `account_merging` for `owner`'s call starts an episode, the next answered call ends it: each is told once
+        /// as an identity change, and only for the player who plays now.
+        /// </summary>
+        internal void NoteMerging(string owner, bool nowMerging)
+        {
+            if (tokens?.Subject != owner || merging == nowMerging) return;
+            merging = nowMerging;
+            Emit(new IdentityChange { Type = nowMerging ? "merging" : "merging_ended", Player = Player });
         }
 
         // ── Tokens ──────────────────────────────────────────────────────────
@@ -234,7 +257,10 @@ namespace Krtuworks.Internal
                 var stored = await Json.Get<StoredTokens>(secrets, Key("tokens"));
                 if (stored == null)
                 {
+                    var had = tokens != null;
                     await Adopt(null);
+                    // Another process signed the player out: this one tells the app too.
+                    if (had) Emit(new IdentityChange { Type = "signed_out", Reason = "signed_out" });
                     throw SignedOut();
                 }
                 if (stored.AccessToken != usedAccess && stored.AccessExpiresAt - RefreshEarlyMs > clock.ServerNowMs)
@@ -277,6 +303,7 @@ namespace Krtuworks.Internal
             // A frozen app keeps its grants: the same refresh token works again once it is resumed.
             if (why.Contains("app_suspended")) throw err;
             await Adopt(null);
+            if (why.Contains("account_deleted")) throw Deleted(stored.Subject);
             if (why.Contains("sanctioned"))
             {
                 Emit(new IdentityChange { Type = "sanctioned" });
@@ -290,6 +317,29 @@ namespace Krtuworks.Internal
             if (stored.Kind == "guest") return await GuestAgain(stored);
             Emit(new IdentityChange { Type = "signed_out", Reason = why });
             throw SignedOut();
+        }
+
+        /// <summary>The account is gone: the app is told once and the player's queues are dropped (the client reads the change).</summary>
+        KrtuworksException Deleted(string subject)
+        {
+            Emit(new IdentityChange { Type = "signed_out", Reason = "account_deleted", PreviousSubject = subject });
+            return new KrtuworksException("account_deleted", "This account was deleted.", 401);
+        }
+
+        /// <summary>The server said the account of `subject` is gone (401 account_deleted on that player's call).</summary>
+        internal async Task MarkDeletedAsync(string subject)
+        {
+            var mine = false;
+            using (await Locks.Take(LockName))
+            {
+                var stored = await Json.Get<StoredTokens>(secrets, Key("tokens"));
+                if (stored?.Subject == subject)
+                {
+                    await Adopt(null);
+                    mine = true;
+                }
+            }
+            if (mine) Emit(new IdentityChange { Type = "signed_out", Reason = "account_deleted", PreviousSubject = subject });
         }
 
         /// <summary>
@@ -340,8 +390,22 @@ namespace Krtuworks.Internal
             return await ProofWith(key, purpose);
         }
 
+        /// <summary>Whether a Steam ticket reached the token endpoint (a ticket that never did is cancelled, not left valid).</summary>
+        sealed class TicketUse
+        {
+            internal bool Sent;
+        }
+
+        /// <summary>Takes back a platform ticket that was got but never sent.</summary>
+        internal void CancelTicket(string? ticket)
+        {
+            if (ticket == null || !(platform is IPlatformTicketCancel cancel)) return;
+            try { cancel.CancelWebApiTicket(ticket); }
+            catch (Exception) { /* the ticket expires on its own */ }
+        }
+
         /// <summary>The device-key (or Steam ticket) grant; the caller holds the identity lock.</summary>
-        async Task<(StoredTokens tokens, bool created)> GuestGrant(GuestRequest? request, string? steamTicket)
+        async Task<(StoredTokens tokens, bool created)> GuestGrant(GuestRequest? request, string? steamTicket, TicketUse use)
         {
             var key = await Json.Get<DeviceKey>(secrets, Key("deviceKey"));
             if (key == null)
@@ -350,7 +414,9 @@ namespace Krtuworks.Internal
                 key = DeviceKey.Create();
                 await Json.Put(secrets, Key("deviceKey"), key);
             }
-            if (!key.Known && request == null) throw new KrtuworksException("birth_date_required", "A new guest needs the age screen: pass the birth date and the accepted terms.", 400);
+            // A new device key needs the age screen, unless a Steam ticket can reach the guest this Steam account already has: then the server decides.
+            var needsAge = !key.Known && request == null;
+            if (needsAge && steamTicket == null) throw new KrtuworksException("birth_date_required", "A new guest needs the age screen: pass the birth date and the accepted terms.", 400);
             var assertion = await ProofWith(key, "login");
             var fields = new Dictionary<string, string?>
             {
@@ -359,14 +425,16 @@ namespace Krtuworks.Internal
                 ["scope"] = Resolved.GuestScope,
                 ["resource"] = Resolved.DevResource,
                 ["ticket"] = steamTicket,
-                ["birth_date"] = key.Known ? null : request!.BirthDate,
-                ["accepted_terms"] = key.Known ? null : request!.AcceptedTerms,
+                ["birth_date"] = key.Known ? null : request?.BirthDate,
+                ["accepted_terms"] = key.Known ? null : request?.AcceptedTerms,
             };
+            use.Sent = true;
             var answer = await Token(fields);
             if (answer.Status != 200)
             {
                 var err = Wire.ErrorOf(answer);
                 if (err.Code == "terms_required") err.Details["terms"] = TermsIn(err.Message);
+                if (needsAge && err.Code == "invalid_birth_date") throw new KrtuworksException("birth_date_required", "A new guest needs the age screen: pass the birth date and the accepted terms.", 400);
                 throw err;
             }
             // A Steam ticket of a Steam-linked Krtuworks ID signs in as that account (it has a username).
@@ -395,7 +463,7 @@ namespace Krtuworks.Internal
         {
             try
             {
-                var (signedIn, _) = await GuestGrant(null, null);
+                var (signedIn, _) = await GuestGrant(null, null, new TicketUse());
                 await Adopt(signedIn);
                 return signedIn;
             }
@@ -404,6 +472,7 @@ namespace Krtuworks.Internal
                 var why = (string?)e.Details["description"] ?? e.Message;
                 if (why.Contains("account_merged")) return await MarkMergedLocked(stored.Subject, null);
                 await Adopt(null);
+                if (why.Contains("account_deleted")) throw Deleted(stored.Subject);
                 if (why.Contains("account_deletion_pending"))
                 {
                     Emit(new IdentityChange { Type = "deletion_pending" });
@@ -426,13 +495,6 @@ namespace Krtuworks.Internal
         /// </summary>
         internal async Task<Player> SignInAsGuestAsync(string? birthDate, string? acceptedTerms, bool viaSteam)
         {
-            var meta = await MetaAsync();
-            var epoch = meta.Epoch;
-            if (birthDate != null)
-            {
-                meta.GuestRequest = new GuestRequest { BirthDate = birthDate, AcceptedTerms = acceptedTerms ?? CurrentTerms };
-                await SaveMeta(meta);
-            }
             Player player;
             bool created;
             using (await Locks.Take(LockName))
@@ -443,16 +505,45 @@ namespace Krtuworks.Internal
                     await Adopt(current);
                     return Player!;
                 }
-                var request = (await MetaAsync()).GuestRequest;
+                var meta = await MetaAsync();
+                var epoch = meta.Epoch;
+                if (birthDate != null)
+                {
+                    meta.GuestRequest = new GuestRequest { BirthDate = birthDate, AcceptedTerms = acceptedTerms ?? CurrentTerms };
+                    await SaveMeta(meta);
+                }
+                else if (acceptedTerms != null && meta.GuestRequest != null && meta.GuestRequest.AcceptedTerms != acceptedTerms)
+                {
+                    // The terms moved on while the request waited: the request goes on with the ones the player accepted now.
+                    meta.GuestRequest.AcceptedTerms = acceptedTerms;
+                    await SaveMeta(meta);
+                }
+                var request = meta.GuestRequest;
                 string? ticket = null;
                 if (viaSteam)
                 {
                     ticket = platform == null ? null : await platform.GetWebApiTicketAsync();
                     if (ticket == null) throw new KrtuworksException("steam_unavailable", "Steam gave no ticket.");
                 }
+                var use = new TicketUse();
                 (StoredTokens, bool) result;
-                try { result = await GuestGrant(request, ticket); }
-                catch (KrtuworksException e) when (ticket != null && e.Code == "steam_not_configured") { result = await GuestGrant(request, null); }
+                try
+                {
+                    try { result = await GuestGrant(request, ticket, use); }
+                    catch (KrtuworksException e) when (ticket != null && e.Code == "steam_not_configured") { result = await GuestGrant(request, null, use); }
+                }
+                catch (Exception e)
+                {
+                    if (!use.Sent) CancelTicket(ticket);
+                    // An answer the server will give again (a date that is not a date, a player under 13) is not kept to be sent at every launch.
+                    if (e is KrtuworksException refused && (refused.Code == "too_young" || refused.Code == "invalid_birth_date"))
+                    {
+                        var kept = await MetaAsync();
+                        kept.GuestRequest = null;
+                        await SaveMeta(kept);
+                    }
+                    throw;
+                }
                 var now = await MetaAsync();
                 if (now.Epoch != epoch) throw new KrtuworksException("context_changed", "A sign-in started while the guest was being made; the guest was not used.");
                 now.GuestRequest = null;
@@ -473,6 +564,7 @@ namespace Krtuworks.Internal
         /// </summary>
         internal async Task<string> BeginSignInAsync(string redirectUri, bool carryGuest = true)
         {
+            await SweepPendingSignInsAsync();
             long epoch;
             using (await Locks.Take(LockName))
             {
@@ -509,6 +601,17 @@ namespace Krtuworks.Internal
             }
             await Json.Put(secrets, Key($"signin:{state}"), new PendingSignIn { Verifier = verifier, Nonce = nonce, RedirectUri = redirectUri, Epoch = epoch, StartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
             return $"{opts.IdOrigin}/oidc/auth?{string.Join("&", query.Select(q => $"{Uri.EscapeDataString(q.Key)}={Uri.EscapeDataString(q.Value)}"))}";
+        }
+
+        /// <summary>A sign-in the player never came back to leaves its record behind: the ones past their time are removed.</summary>
+        async Task SweepPendingSignInsAsync()
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            foreach (var key in await secrets.KeysAsync(Key("signin:")))
+            {
+                var pending = await Json.Get<PendingSignIn>(secrets, key);
+                if (pending == null || now - pending.StartedAt > PendingTtlMs) await secrets.DeleteAsync(key);
+            }
         }
 
         /// <summary>The query of a return address, read from the text (a phone's return has the app's own scheme, which <see cref="Uri"/> parses differently per runtime).</summary>
@@ -704,18 +807,51 @@ namespace Krtuworks.Internal
 
     /// <summary>
     /// The one request the system browser sends back to the app (RFC 8252 §7.3): a listener on 127.0.0.1
-    /// at a port the system picks, answering a small page and handing the address over.
+    /// at a port the system picks, answering a small page and handing the address over. A connection that
+    /// says nothing (a browser's idle pre-connect) is let go after <see cref="ReadTimeout"/> so the real request behind it is served.
     /// </summary>
     internal sealed class LoopbackReceiver : IDisposable
     {
         readonly TcpListener listener;
         internal int Port { get; }
+        /// <summary>How long a connection may take to send its request line.</summary>
+        internal TimeSpan ReadTimeout = TimeSpan.FromSeconds(5);
 
         internal LoopbackReceiver()
         {
             listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
             Port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+
+        /// <summary>The request line's text read from the connection; null when it sent none in time, closed, or failed.</summary>
+        async Task<string?> ReadRequestLineAsync(TcpClient client, CancellationToken cancel)
+        {
+            var stream = client.GetStream();
+            var buffer = new byte[8192];
+            var length = 0;
+            var deadline = Task.Delay(ReadTimeout, cancel);
+            while (length < buffer.Length)
+            {
+                var read = stream.ReadAsync(buffer, length, buffer.Length - length);
+                // The token cannot abort a pending read on every runtime: the wait is ours, and closing the client ends the read.
+                if (await Task.WhenAny(read, deadline) != read)
+                {
+                    client.Close();
+                    try { await read; }
+                    catch (Exception) { /* the read ended because the connection was closed */ }
+                    return null;
+                }
+                int count;
+                try { count = await read; }
+                catch (Exception) { return null; }
+                if (count <= 0) return null;
+                length += count;
+                var text = Encoding.ASCII.GetString(buffer, 0, length);
+                var end = text.IndexOf("\r\n", StringComparison.Ordinal);
+                if (end >= 0) return text.Substring(0, end);
+            }
+            return Encoding.ASCII.GetString(buffer, 0, length);
         }
 
         internal async Task<string> WaitAsync(CancellationToken cancel)
@@ -729,10 +865,11 @@ namespace Krtuworks.Internal
                     catch (Exception) when (cancel.IsCancellationRequested) { throw new OperationCanceledException(cancel); }
                     using (client)
                     {
-                        var stream = client.GetStream();
-                        var buffer = new byte[8192];
-                        var read = await stream.ReadAsync(buffer, 0, buffer.Length, cancel);
-                        var line = Encoding.ASCII.GetString(buffer, 0, read).Split(new[] { "\r\n" }, StringSplitOptions.None)[0];
+                        string? line;
+                        try { line = await ReadRequestLineAsync(client, cancel); }
+                        catch (Exception) when (cancel.IsCancellationRequested) { throw new OperationCanceledException(cancel); }
+                        if (cancel.IsCancellationRequested) throw new OperationCanceledException(cancel);
+                        if (line == null) continue;
                         var parts = line.Split(' ');
                         var path = parts.Length > 1 ? parts[1] : "/";
                         var ours = path.StartsWith("/callback", StringComparison.Ordinal);
@@ -741,7 +878,8 @@ namespace Krtuworks.Internal
                             : "";
                         var head = ours ? "HTTP/1.1 200 OK" : "HTTP/1.1 404 Not Found";
                         var bytes = Encoding.UTF8.GetBytes($"{head}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {Encoding.UTF8.GetByteCount(page)}\r\nConnection: close\r\n\r\n{page}");
-                        await stream.WriteAsync(bytes, 0, bytes.Length, cancel);
+                        try { await client.GetStream().WriteAsync(bytes, 0, bytes.Length); }
+                        catch (Exception) when (!ours) { /* the browser went away: nothing to answer */ }
                         if (ours) return $"http://127.0.0.1:{Port}{path}";
                     }
                 }

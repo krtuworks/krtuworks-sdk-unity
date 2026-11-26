@@ -98,6 +98,19 @@ namespace Krtuworks
         /// <summary>The terms a new guest accepts on the age screen (Krtuworks ID Terms + Privacy, the versions this SDK shows).</summary>
         public const string CurrentTerms = Identity.CurrentTerms;
 
+        /// <summary><see cref="State"/> when the SDK is ready.</summary>
+        public const string StateReady = "ready";
+
+        /// <summary>
+        /// <see cref="State"/> when the app asks for the server on the very first launch (`firstLaunch: "online"` in krtuworks-config.json),
+        /// there is no player yet, and the server could not be reached: the game shows "connect to play" and tries again with
+        /// <see cref="RefreshConfigAsync"/> (or leaves it to the SDK's own refresh).
+        /// </summary>
+        public const string StateFirstLaunchOffline = "first_launch_offline";
+
+        /// <summary>`ready`, or `first_launch_offline` (see <see cref="StateFirstLaunchOffline"/>). Without `firstLaunch: "online"` it is always `ready`: the game starts offline-first.</summary>
+        public string State { get; private set; } = StateReady;
+
         static readonly Regex EventType = new Regex("^[a-z][a-z0-9_]{0,63}$");
         static readonly Regex Pairwise = new Regex("^pw_[A-Za-z0-9_-]{8,120}$");
         const long FlushMs = 30_000;
@@ -136,7 +149,7 @@ namespace Krtuworks
         Task settling = Task.CompletedTask;
         readonly SingleFlight<SendResult> flushing = new SingleFlight<SendResult>();
 
-        /// <summary>The player changed: signed_in · guest · signed_out · merged · deletion_pending · sanctioned.</summary>
+        /// <summary>The player changed: signed_in · guest · signed_out · merged · deletion_pending · sanctioned; and while an account is being merged, merging (once) · merging_ended (once).</summary>
         public event Action<IdentityChange>? IdentityChanged;
         /// <summary>A merged account's waiting queues moved to the signed-in player (after the server confirmed the merge).</summary>
         public event Action<MergeSettlement>? MergeSettled;
@@ -187,7 +200,9 @@ namespace Krtuworks
             var steamSessions = options.Platform == "STEAM" && platform != null;
             sessions = new SessionKeeper(options, api, Subject, steamSessions ? platform!.GetWebApiTicketAsync : (Func<Task<string?>>?)null);
             config = new RemoteConfig(options, api, store);
-            files = new Files(options, api, store, Subject, () => identity.Generation, () => _ = Quietly(RemindLinking("first_save")));
+            sessions.CancelTicket = identity.CancelTicket;
+            sessions.Wanted = () => options.Sessions && config.ModuleOn("sessions") && config.SwitchForBuild()?.Mode != "ALL";
+            files = new Files(options, api, store, Subject, () => identity.Generation, () => _ = Quietly(RemindLinking("first_save"))) { Stop = stopping.Token };
             if (platform is IPlatformCloud platformCloud)
                 cloudMirror = new CloudMirror(platformCloud, files, store, options.ClientId, conflict =>
                 {
@@ -224,7 +239,14 @@ namespace Krtuworks
             await krtu.licences.EnsureLoadedAsync();
             krtu.identity.Changed += krtu.OnIdentityChanged;
             krtu.lastFlushAt = krtu.lastConfigAt = krtu.uptime.ElapsedMilliseconds;
-            _ = Quietly(krtu.RefreshConfigAsync());
+            if (krtu.options.FirstLaunchOnline && krtu.identity.Player == null && krtu.config.Value == null)
+            {
+                // The very first launch of an app that needs the server: it has to answer now, or the game says so.
+                try { await krtu.config.RefreshAsync(); }
+                catch (KrtuworksException err) when (err.Status == 0) { krtu.State = StateFirstLaunchOffline; }
+                catch (KrtuworksException) { /* the server answered, just not with a config: the SDK's own refresh asks again */ }
+            }
+            else _ = Quietly(krtu.RefreshConfigAsync());
             krtu.settling = krtu.Settle();
             _ = krtu.Loop(krtu.stopping.Token);
             return krtu;
@@ -261,6 +283,9 @@ namespace Krtuworks
         internal Func<TimeSpan, CancellationToken, Task> Delay => options.Delay;
 
         internal string IdOrigin => options.IdOrigin;
+
+        /// <summary>The server's time now (the device clock moved by the offset the SDK learned from the server).</summary>
+        internal DateTimeOffset ServerNow => DateTimeOffset.FromUnixTimeMilliseconds(clock.ServerNowMs);
 
         public string Environment => options.Environment;
 
@@ -313,6 +338,14 @@ namespace Krtuworks
 
         void OnIdentityChanged(IdentityChange change)
         {
+            if (change.Type == "merging" || change.Type == "merging_ended")
+            {
+                // Only the game is told: the player and the queues are as they were.
+                try { IdentityChanged?.Invoke(change); }
+                catch (Exception) { /* the app's listener */ }
+                return;
+            }
+            if (change.Type == "signed_out" && change.Reason == "account_deleted" && change.PreviousSubject != null) _ = Quietly(DropOwnerAsync(change.PreviousSubject));
             if (change.Type == "merged" || change.Type == "signed_out" || change.Type == "deletion_pending" || change.Type == "sanctioned")
             {
                 sessions.Close();
@@ -337,6 +370,15 @@ namespace Krtuworks
             }
             try { IdentityChanged?.Invoke(change); }
             catch (Exception) { /* the app's listener */ }
+        }
+
+        /// <summary>The player's account is gone: what waited on this device for it can never be taken.</summary>
+        async Task DropOwnerAsync(string owner)
+        {
+            await events.DropAsync(owner);
+            await progress.DropAsync(owner);
+            await bugs.DropAsync(owner);
+            await files.DropOwnerAsync(owner);
         }
 
         async Task After(Task previous)
@@ -854,6 +896,7 @@ namespace Krtuworks
         public async Task RefreshConfigAsync()
         {
             await config.RefreshAsync();
+            State = StateReady;
         }
 
         /// <summary>The owner's gates for this build: maintenance, a newer minimum version, a switch.</summary>
@@ -935,10 +978,22 @@ namespace Krtuworks
             return saved;
         }
 
-        /// <summary>Saves a SETTINGS slot (the latest wins), or DEVICE_SETTINGS with this device's id and description.</summary>
+        /// <summary>Saves a version of a SAVE or PROFILE slot with no check against the slot's current version (the new save wins). To guard against another device's save, name the version read: <see cref="SaveFileAsync(string, byte[], string?)"/>.</summary>
+        public async Task<FileVersion> SaveFileAsync(string slot, byte[] data)
+        {
+            var saved = await files.SaveAsync(slot, data, false, null, null);
+            _ = MirrorFiles(slot);
+            return saved;
+        }
+
+        /// <summary>
+        /// Saves a SETTINGS slot (the latest wins), or DEVICE_SETTINGS with this device's id and description. A slot is written at most
+        /// once every 30 seconds: a save inside that time waits (the call completes when it was written), and a newer save of the slot
+        /// replaces it (<c>save_replaced</c>). What waits is written when the app pauses or ends.
+        /// </summary>
         public async Task<FileVersion> SaveSettingsAsync(string slot, byte[] data, SaveDevice? device = null)
         {
-            var saved = await files.SaveAsync(slot, data, false, null, device);
+            var saved = await files.SaveAsync(slot, data, false, null, device, null, true);
             if (device == null) _ = MirrorFiles(slot);
             return saved;
         }
@@ -1043,9 +1098,6 @@ namespace Krtuworks
         /// <summary>The validator's round: a session opened, kept alive once and ended, every step answered.</summary>
         internal Task SessionRoundAsync() => sessions.RoundAsync();
 
-        /// <summary>Sends again the saves a refusal left waiting (same upload id, same bytes).</summary>
-        internal Task<List<ResumedUpload>> ResumeFilesAsync() => files.ResumeAsync();
-
         /// <summary>The platform's services the SDK uses (Steam), null in an app that is not a game.</summary>
         internal IPlatformServices? PlatformServices => platform;
 
@@ -1062,6 +1114,7 @@ namespace Krtuworks
             sessions.SetForeground(foreground);
             if (foreground) return;
             _ = Quietly(events.PersistAsync());
+            _ = Quietly(files.FlushSettingsAsync());
             if (statMirror != null) _ = Quietly(statMirror.StoreAsync(true));
         }
 
@@ -1071,6 +1124,8 @@ namespace Krtuworks
             events.ResetBackoff();
             progress.ResetBackoff();
             bugs.ResetBackoff();
+            sessions.RetryOpenSoon();
+            if (State != StateReady) _ = Quietly(RefreshConfigAsync());
             _ = Quietly(FlushAsync());
         }
 
@@ -1079,6 +1134,7 @@ namespace Krtuworks
         {
             stopping.Cancel();
             levels.Finish("quit", null);
+            await Quietly(files.FlushSettingsAsync());
             await events.PersistAsync();
             if (statMirror != null) await Quietly(statMirror.StoreAsync(true));
             await sessions.EndAsync();

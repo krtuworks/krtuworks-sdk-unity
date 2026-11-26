@@ -42,6 +42,8 @@ namespace Krtuworks.Internal
             internal Stopwatch Since = Stopwatch.StartNew();
             internal long ActiveAtStart;
             internal int Deaths;
+            /// <summary>The player the attempt belongs to.</summary>
+            internal string Owner = "";
         }
 
         readonly IKrtuStore store;
@@ -86,14 +88,28 @@ namespace Krtuworks.Internal
             return data;
         }
 
+        /// <summary>
+        /// An attempt belongs to the player who started it: when another one plays now it is let go without a word (nothing is told
+        /// under the new player's name). One started before any player existed belongs to the first one.
+        /// </summary>
+        void DropOtherPlayersAttempt()
+        {
+            if (current == null) return;
+            var now = owner();
+            if (current.Owner == now) return;
+            if (current.Owner == EventQueue.Anon) current.Owner = now;
+            else current = null;
+        }
+
         internal async Task StartAsync(LevelRef level)
         {
+            DropOtherPlayersAttempt();
             if (current != null) Finish("quit", null);
             var counts = await Json.Get<Dictionary<string, int>>(store, Key) ?? new Dictionary<string, int>();
             var reference = RefOf(level);
             counts[reference] = (counts.TryGetValue(reference, out var n) ? n : 0) + 1;
             await Json.Put(store, Key, counts);
-            current = new Attempt { Level = level, Number = counts[reference], ActiveAtStart = activeSeconds() };
+            current = new Attempt { Level = level, Number = counts[reference], ActiveAtStart = activeSeconds(), Owner = owner() };
             var data = With(Place(level), "start");
             data["attempt"] = current.Number;
             emit(data);
@@ -102,6 +118,7 @@ namespace Krtuworks.Internal
         /// <summary>Ends the attempt in play: complete, fail or quit.</summary>
         internal void Finish(string action, double? score)
         {
+            DropOtherPlayersAttempt();
             var a = current;
             if (a == null) return;
             current = null;
@@ -112,6 +129,7 @@ namespace Krtuworks.Internal
 
         internal void Checkpoint(string name)
         {
+            DropOtherPlayersAttempt();
             var a = current;
             if (a == null) return;
             var data = Times(a, With(Place(a.Level), "checkpoint"));
@@ -122,6 +140,7 @@ namespace Krtuworks.Internal
         /// <summary>The level starts over: the attempt in play ends as a restart and a new one begins.</summary>
         internal async Task RestartAsync()
         {
+            DropOtherPlayersAttempt();
             var a = current;
             if (a == null) return;
             current = null;
@@ -132,11 +151,19 @@ namespace Krtuworks.Internal
         /// <summary>A death counts toward the attempt in play; returns where it happened.</summary>
         internal LevelRef? NoteDeath()
         {
+            DropOtherPlayersAttempt();
             if (current == null) return null;
             current.Deaths++;
             return current.Level;
         }
 
-        internal LevelRef? InPlay => current?.Level;
+        internal LevelRef? InPlay
+        {
+            get
+            {
+                DropOtherPlayersAttempt();
+                return current?.Level;
+            }
+        }
     }
 }

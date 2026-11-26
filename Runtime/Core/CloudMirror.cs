@@ -122,7 +122,8 @@ namespace Krtuworks.Internal
         async Task SyncOnce(string owner, string account, string sessionId, string? only)
         {
             if (!cloud.CloudEnabled()) return;
-            var list = await files.ListAsync();
+            // Every call below is for `owner`: when another player plays meanwhile, nothing of this sync reaches the server for them.
+            var list = await files.ListFor(owner);
             var key = AgreedKey(owner, account);
             var agreed = await Json.Get<Dictionary<string, string>>(store, key) ?? new Dictionary<string, string>();
             foreach (var slot in list.Slots)
@@ -131,14 +132,19 @@ namespace Krtuworks.Internal
                 if (!slot.PlatformMirror || slot.Retired || !MirroredKinds.Contains(slot.Kind) || leftAlone.Contains(slot.Key)) continue;
                 try
                 {
-                    await SyncSlot(slot, agreed, sessionId);
+                    await SyncSlot(owner, slot, agreed, sessionId);
+                }
+                catch (KrtuworksException err) when (err.Code == "context_changed")
+                {
+                    // The player changed: this sync was theirs; the next one is the new player's.
+                    return;
                 }
                 catch (KrtuworksException err)
                 {
                     // The slot moved meanwhile, a write still settling or replaced by the game's newer save, the
                     // server away: the next sync compares again. Refused for good (too big, over the player's
                     // quota, the link): left alone for the session.
-                    if (!err.Retryable && err.Code != "file_conflict" && err.Code != "upload_pending" && err.Code != "save_replaced")
+                    if (!err.Retryable && !err.KeepsQueued && err.Code != "file_conflict" && err.Code != "upload_pending" && err.Code != "save_replaced")
                     {
                         leftAlone.Add(slot.Key);
                         problem($"platform_{err.Code}", slot.Key);
@@ -148,7 +154,7 @@ namespace Krtuworks.Internal
             }
         }
 
-        async Task SyncSlot(SlotView slot, Dictionary<string, string> agreed, string sessionId)
+        async Task SyncSlot(string owner, SlotView slot, Dictionary<string, string> agreed, string sessionId)
         {
             var name = FileName(slot.Key);
             var onPlatform = await cloud.ReadFileAsync(name);
@@ -170,16 +176,16 @@ namespace Krtuworks.Internal
                     else agreed[slot.Key] = h;
                     return;
                 case MirrorStep.ToPlatform:
-                    await ToPlatform(slot.Key, h!, onPlatform, agreed);
+                    await ToPlatform(owner, slot.Key, h!, onPlatform, agreed);
                     return;
                 case MirrorStep.ToServer:
                     // A SAVE or PROFILE over the version compared (or into the empty slot); SETTINGS: the latest wins.
                     var conditional = slot.Kind != "SETTINGS";
-                    var saved = await files.SaveAsync(slot.Key, onPlatform!.Data, conditional, conditional ? slot.File?.Id : null, null);
+                    var saved = await files.SaveAsync(slot.Key, onPlatform!.Data, conditional, conditional ? slot.File?.Id : null, null, owner);
                     agreed[slot.Key] = saved.Sha256;
                     return;
                 case MirrorStep.Offer:
-                    await Offer(slot, onPlatform!, s!, agreed, sessionId);
+                    await Offer(owner, slot, onPlatform!, s!, agreed, sessionId);
                     return;
             }
         }
@@ -191,9 +197,9 @@ namespace Krtuworks.Internal
             return onPlatform.WrittenAt > savedAt.ToUnixTimeSeconds();
         }
 
-        async Task ToPlatform(string slot, string h, PlatformCloudFile? onPlatform, Dictionary<string, string> agreed)
+        async Task ToPlatform(string owner, string slot, string h, PlatformCloudFile? onPlatform, Dictionary<string, string> agreed)
         {
-            var read = await files.ReadAsync(slot, null, null);
+            var read = await files.ReadAsync(slot, null, null, owner);
             // The slot moved since the list was read: the next sync compares the new version.
             if (read == null || read.Sha256 != h) return;
             var free = await cloud.AvailableBytesAsync();
@@ -212,12 +218,12 @@ namespace Krtuworks.Internal
             agreed[slot] = h;
         }
 
-        async Task Offer(SlotView slot, PlatformCloudFile onPlatform, string s, Dictionary<string, string> agreed, string sessionId)
+        async Task Offer(string owner, SlotView slot, PlatformCloudFile onPlatform, string s, Dictionary<string, string> agreed, string sessionId)
         {
             FileVersion offered;
             try
             {
-                offered = await files.OfferAsync(slot.Key, onPlatform.Data, slot.File!.Id, sessionId);
+                offered = await files.OfferAsync(slot.Key, onPlatform.Data, slot.File!.Id, sessionId, owner);
             }
             catch (KrtuworksException err) when (err.Code == "same_as_current")
             {

@@ -16,6 +16,8 @@ namespace Krtuworks
         [JsonProperty("slug")] public string Slug = "";
         /// <summary>GAME, MOBILE_APP, WEB_APP or DESKTOP_APP. The game-only parts (levels, deaths, Steam) stay off in the other kinds; a file made before the field existed is a game's.</summary>
         [JsonProperty("type")] public string? Type;
+        /// <summary>`online`: the very first launch (no player yet) needs the server; without it <see cref="KrtuworksClient.State"/> is `first_launch_offline`. Otherwise the game starts offline-first.</summary>
+        [JsonProperty("firstLaunch")] public string? FirstLaunch;
         [JsonProperty("environments")] public Dictionary<string, EnvironmentClients> Environments = new Dictionary<string, EnvironmentClients>();
 
         public sealed class EnvironmentClients
@@ -86,6 +88,12 @@ namespace Krtuworks
 
         /// <summary>Takes an achievement back on the platform by its platform id (support took it back here).</summary>
         System.Threading.Tasks.Task ClearAchievementAsync(string platformId);
+    }
+
+    /// <summary>A platform that can take back a web API ticket that was got and never sent (Steam: <c>CancelAuthTicket</c>), so it is not left valid.</summary>
+    public interface IPlatformTicketCancel
+    {
+        void CancelWebApiTicket(string ticket);
     }
 
     /// <summary>
@@ -194,6 +202,8 @@ namespace Krtuworks.Internal
         internal DeviceInfo? Device;
         internal string? Locale;
         internal bool Sessions;
+        /// <summary>The app needs the server on the very first launch (`firstLaunch: "online"`).</summary>
+        internal bool FirstLaunchOnline;
         internal Func<TimeSpan, System.Threading.CancellationToken, System.Threading.Tasks.Task> Delay = System.Threading.Tasks.Task.Delay;
 
         /// <summary>The app is a game (type GAME): levels, deaths and the platform's services are used.</summary>
@@ -230,6 +240,7 @@ namespace Krtuworks.Internal
                 Device = o.Device,
                 Locale = o.Locale,
                 Sessions = o.Sessions,
+                FirstLaunchOnline = string.Equals(o.Config.FirstLaunch, "online", StringComparison.OrdinalIgnoreCase),
                 Delay = o.Delay ?? System.Threading.Tasks.Task.Delay,
             };
         }

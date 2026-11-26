@@ -185,6 +185,21 @@ namespace Krtuworks.Tests
         }
 
         [Test]
+        public async Task ATicketNeverSentIsCancelledByItsText_ControlAnUnknownOrAlreadyCancelledOneIsNot()
+        {
+            var steam = new FakeBackend();
+            var sync = new SteamAchievementSync(steam);
+            var pending = sync.GetWebApiTicketAsync();
+            sync.OnTicketAnswer(7, new byte[] { 0xab, 0xcd }, 2);
+            var ticket = await pending;
+            sync.CancelWebApiTicket("not-a-ticket-we-gave");
+            Assert.That(steam.Calls, Is.Empty, "control: a ticket this class never handed out is not Steam's to cancel");
+            sync.CancelWebApiTicket(ticket!);
+            sync.CancelWebApiTicket(ticket!);
+            Assert.That(steam.Calls, Is.EqualTo(new[] { "cancel:7" }), "cancelled once, by the handle it was issued under");
+        }
+
+        [Test]
         public async Task NoTicketWhenSteamIsNotRunning_ControlNothingIsAskedOfSteam()
         {
             var steam = new FakeBackend { Running = false };

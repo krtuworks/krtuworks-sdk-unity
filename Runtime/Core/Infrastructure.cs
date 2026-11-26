@@ -246,6 +246,8 @@ namespace Krtuworks.Internal
         internal int Status;
         internal HttpAnswer Raw = new HttpAnswer();
         internal JObject? Json;
+        /// <summary>The server's clock when the answer came (ms); 0 when this answer was not read through a <see cref="Clock"/>.</summary>
+        internal long ServerNowMs;
     }
 
     internal static class Wire
@@ -258,7 +260,7 @@ namespace Krtuworks.Internal
             var json = type.Contains("json") ? Json.Parse(raw.Body) : null;
             var serverTime = json?["serverTime"]?.Type == JTokenType.String ? (string?)json["serverTime"] : null;
             if (serverTime != null) clock.NoteServerTime(serverTime);
-            return new Answer { Status = raw.Status, Raw = raw, Json = json };
+            return new Answer { Status = raw.Status, Raw = raw, Json = json, ServerNowMs = clock.ServerNowMs };
         }
 
         /// <summary>
@@ -289,7 +291,14 @@ namespace Krtuworks.Internal
             json.Remove("error_description");
             double? retryAfter = null;
             if (json["retryAfter"]?.Type == JTokenType.Integer || json["retryAfter"]?.Type == JTokenType.Float) retryAfter = (double)json["retryAfter"]!;
-            else if (double.TryParse(answer.Raw.Header("retry-after"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ra)) retryAfter = ra;
+            else
+            {
+                var header = answer.Raw.Header("retry-after");
+                if (double.TryParse(header, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ra)) retryAfter = ra;
+                // An HTTP date is counted from the server's clock, not the device's.
+                else if (answer.ServerNowMs > 0 && DateTimeOffset.TryParse(header, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var date))
+                    retryAfter = Math.Max(0, (date.ToUnixTimeMilliseconds() - answer.ServerNowMs) / 1000.0);
+            }
             return new KrtuworksException(code, message, answer.Status, retryAfter, json);
         }
 

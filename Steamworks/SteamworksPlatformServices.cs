@@ -16,7 +16,7 @@ namespace Krtuworks.Steamworks
     /// SteamManager does both); its Steam stats are loaded before achievements are read.
     /// <code>await KrtuworksUnity.InitializeAsync(new KrtuworksUnityOptions { PlatformServices = new SteamworksPlatformServices() });</code>
     /// </summary>
-    public sealed class SteamworksPlatformServices : IPlatformServices, IPlatformStats, IPlatformCloud, IPlatformLeaderboards, IPlatformPresence
+    public sealed class SteamworksPlatformServices : IPlatformServices, IPlatformStats, IPlatformCloud, IPlatformLeaderboards, IPlatformPresence, IPlatformOwnership, IPlatformTicketCancel
     {
         readonly SteamAchievementSync sync = new SteamAchievementSync(new SteamworksBackend());
         readonly Callback<GetTicketForWebApiResponse_t> ticketAnswers;
@@ -53,6 +53,10 @@ namespace Krtuworks.Steamworks
         public bool SetRichPresence(string key, string value) => sync.SetRichPresence(key, value);
 
         public void ClearRichPresence() => sync.ClearRichPresence();
+
+        public bool? OwnsProduct(string platformProductId) => sync.OwnsProduct(platformProductId);
+
+        public void CancelWebApiTicket(string ticket) => sync.CancelWebApiTicket(ticket);
 
         void OnTicket(GetTicketForWebApiResponse_t answer)
         {

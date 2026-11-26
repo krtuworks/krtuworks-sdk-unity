@@ -162,23 +162,38 @@ namespace Krtuworks.Internal
                 buffer.Clear();
                 persistSoon = false;
             }
-            foreach (var group in taken.GroupBy(t => t.owner))
+            var written = new HashSet<string>();
+            try
             {
-                using (await Locks.Take(Key(group.Key)))
+                foreach (var group in taken.GroupBy(t => t.owner))
                 {
-                    var state = await Load(group.Key);
-                    state.Pending.AddRange(group.Select(g => g.ev));
-                    Trim(state);
-                    await Save(group.Key, state);
+                    using (await Locks.Take(Key(group.Key)))
+                    {
+                        var state = await Load(group.Key);
+                        state.Pending.AddRange(group.Select(g => g.ev));
+                        Trim(state);
+                        await Save(group.Key, state);
+                    }
+                    written.Add(group.Key);
                 }
+            }
+            catch (Exception)
+            {
+                // The store refused (full, locked): what it has not taken goes back to wait for the next write.
+                lock (buffer) buffer.InsertRange(0, taken.Where(t => !written.Contains(t.owner)));
+                throw;
             }
         }
 
-        static void Trim(EventQueueState state)
+        /// <summary>
+        /// Drops the events older than the age limit, counted on the server's clock (the event's own clock reading is moved by the
+        /// offset it was made with, and "now" is the server's now), so a device clock that was wrong never ages an event out.
+        /// </summary>
+        void Trim(EventQueueState state)
         {
-            var oldest = DateTimeOffset.UtcNow - MaxAge;
+            var oldest = clock.ServerNowMs - (long)MaxAge.TotalMilliseconds;
             var before = state.Pending.Count;
-            state.Pending = state.Pending.Where(e => !DateTimeOffset.TryParse(e.CreatedAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var at) || at >= oldest).ToList();
+            state.Pending = state.Pending.Where(e => !DateTimeOffset.TryParse(e.CreatedAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var at) || at.ToUnixTimeMilliseconds() + (e.ServerOffsetMs ?? 0) >= oldest).ToList();
             var bytes = state.Pending.Sum(SizeOf) + (state.Batch?.Events.Sum(SizeOf) ?? 0);
             var count = state.Pending.Count + (state.Batch?.Events.Count ?? 0);
             var cut = 0;
@@ -199,6 +214,13 @@ namespace Krtuworks.Internal
             int inMemory;
             lock (buffer) inMemory = buffer.Count(b => b.owner == owner);
             return state.Pending.Count + (state.Batch?.Events.Count ?? 0) + inMemory;
+        }
+
+        /// <summary>The player's account is gone: what waited for it, written or not, is dropped.</summary>
+        internal async Task DropAsync(string owner)
+        {
+            lock (buffer) buffer.RemoveAll(b => b.owner == owner);
+            using (await Locks.Take(Key(owner))) await store.DeleteAsync(Key(owner));
         }
 
         /// <summary>
@@ -424,7 +446,7 @@ namespace Krtuworks.Internal
                 await Unfreeze(owner, batch);
                 return "done";
             }
-            if (err.Status == 400 || err.Status == 413)
+            if ((err.Status == 400 || err.Status == 413) && !err.KeepsQueued)
             {
                 // The batch itself can never be taken: drop it rather than block every later event.
                 using (await Locks.Take(Key(owner)))
@@ -439,8 +461,8 @@ namespace Krtuworks.Internal
                 }
                 return err.Code;
             }
-            backoffMs = Math.Min(300_000, Math.Max(5_000, backoffMs * 2));
-            notBefore = NowMs + (err.RetryAfter.HasValue ? (long)(err.RetryAfter.Value * 1000) : backoffMs);
+            // A refusal that can lift (a frozen app, a merge, a module off) and a failure of the token keep the batch, with a long wait.
+            notBefore = NowMs + Retry.DelayMs(err, ref backoffMs);
             return err.Code;
         }
 

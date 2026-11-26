@@ -71,7 +71,9 @@ namespace Krtuworks.Internal
                 Accept = new[] { 304 },
             });
             if (answer.Status == 304) return false;
-            stored = new StoredConfig { Etag = answer.Raw.Header("etag"), Value = answer.Json ?? new JObject() };
+            // A page that is not the config (a captive portal's, a proxy's) must not replace the kept copy.
+            if (answer.Json == null) throw new KrtuworksException("invalid_response", "The config answer is not a JSON object.", answer.Status);
+            stored = new StoredConfig { Etag = answer.Raw.Header("etag"), Value = answer.Json };
             await Json.Put(store, Key, stored);
             return true;
         }

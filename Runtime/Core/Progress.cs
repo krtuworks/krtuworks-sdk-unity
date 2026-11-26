@@ -110,8 +110,8 @@ namespace Krtuworks.Internal
         const int MaxOps = 100;
         /// <summary>Refusals that say the stat, achievement or leaderboard itself is gone: what waits for it goes too.</summary>
         static readonly HashSet<string> KeyGone = new HashSet<string> { "unknown_stat", "stat_retired", "unknown_achievement", "achievement_retired", "unknown_leaderboard", "leaderboard_retired" };
-        /// <summary>The leaderboards module is off: a score op is not refused for good, it stays queued.</summary>
-        const string ModuleDisabled = "module_disabled";
+        /// <summary>Refusals kept for the game's diagnostics: the newest ones.</summary>
+        const int RefusalsKept = 100;
         const int MaxDetailsBytes = 64;
 
         readonly Resolved opts;
@@ -433,8 +433,8 @@ namespace Krtuworks.Internal
         /// <summary>
         /// Sends the signed-in player's ops until nothing waits or a send fails. Answers per op: applied and
         /// duplicate end the op; a refusal for good ends it too (and everything waiting for a stat or
-        /// achievement or leaderboard that no longer exists); anything else keeps it frozen for the next flush. A score op
-        /// answered `module_disabled` stays queued and is not sent again within this flush.
+        /// achievement or leaderboard that no longer exists); anything else keeps it frozen for the next flush. An op
+        /// answered with a refusal that can lift (`module_disabled`, `app_suspended` …) stays queued and is not sent again within this flush.
         /// </summary>
         internal async Task<ProgressFlushResult> FlushAsync()
         {
@@ -453,6 +453,7 @@ namespace Krtuworks.Internal
             await LoadKinds();
             await LoadBoards();
             var parked = new HashSet<string>();
+            string? parkedBy = null;
             for (var round = 0; round < 50; round++)
             {
                 List<FrozenOp> ops;
@@ -464,7 +465,7 @@ namespace Krtuworks.Internal
                 }
                 if (ops.Count == 0)
                 {
-                    if (parked.Count > 0) output.StoppedBy = ModuleDisabled;
+                    if (parked.Count > 0) output.StoppedBy = parkedBy;
                     return output;
                 }
                 Answer answer;
@@ -479,8 +480,8 @@ namespace Krtuworks.Internal
                 }
                 catch (KrtuworksException err)
                 {
-                    backoffMs = Math.Min(300_000, Math.Max(5_000, backoffMs * 2));
-                    notBefore = NowMs + (err.RetryAfter.HasValue ? (long)(err.RetryAfter.Value * 1000) : backoffMs);
+                    // Every op stays frozen: a refusal that can lift or a failure of the token only sets the wait.
+                    notBefore = NowMs + Retry.DelayMs(err, ref backoffMs);
                     output.StoppedBy = err.Code;
                     return output;
                 }
@@ -501,9 +502,10 @@ namespace Krtuworks.Internal
                         var type = frozen.Type;
                         var key = frozen.Key;
                         var inFlight = InFlightOf(state, type, key)!;
-                        if (type == "score" && (string?)r["status"] == "rejected" && (string?)r["code"] == ModuleDisabled)
+                        if ((string?)r["status"] == "rejected" && KrtuworksException.WaitingCodes.Contains((string?)r["code"] ?? ""))
                         {
                             parked.Add(opId!);
+                            parkedBy ??= (string?)r["code"];
                             held++;
                             continue;
                         }
@@ -513,6 +515,7 @@ namespace Krtuworks.Internal
                         {
                             var code = (string?)r["code"] ?? "rejected";
                             Refusals.Add(new ProgressRefusal { Type = type, Key = key, Code = code });
+                            if (Refusals.Count > RefusalsKept) Refusals.RemoveAt(0);
                             if (KeyGone.Contains(code))
                             {
                                 if (type == "unlock") state.Unlocks.Remove(key);
@@ -544,6 +547,12 @@ namespace Krtuworks.Internal
             if (type == "unlock") return state.Unlocks.TryGetValue(key, out var u) ? u.InFlight : null;
             if (type == "score") return state.Scores.TryGetValue(key, out var sc) ? sc.InFlight : null;
             return state.Stats.TryGetValue(key, out var s) ? s.InFlight : null;
+        }
+
+        /// <summary>The player's account is gone: what waited for it is dropped.</summary>
+        internal async Task DropAsync(string owner)
+        {
+            using (await Locks.Take(Key(owner))) await store.DeleteAsync(Key(owner));
         }
 
         internal void ResetBackoff()

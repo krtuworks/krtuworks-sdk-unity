@@ -61,6 +61,15 @@ namespace Krtuworks.Internal
         /// <summary>Told the licence list of a session answer (only an open that sent a platform proof gets one).</summary>
         internal Func<Newtonsoft.Json.Linq.JToken?, Task>? OnEntitlements;
         readonly SingleFlight<SessionInfo?> opening = new SingleFlight<SessionInfo?>();
+        /// <summary>Takes back a ticket that was got and never sent (set by the client).</summary>
+        internal Action<string>? CancelTicket;
+        /// <summary>Whether a session is wanted now (sessions on, the module on); a failed open is tried again only then.</summary>
+        internal Func<bool> Wanted = () => true;
+        /// <summary>The player the latest open ran for.</summary>
+        string? openedFor;
+        /// <summary>When a failed open is tried again (null: none failed).</summary>
+        long? openRetryAt;
+        long openBackoffMs;
 
         internal SessionKeeper(Resolved opts, Api api, Func<string?> subject, Func<Task<string?>>? platformTicket)
         {
@@ -103,17 +112,54 @@ namespace Krtuworks.Internal
             }
         }
 
-        /// <summary>Opens the player's session if there is none (one at a time).</summary>
-        internal Task<SessionInfo?> OpenAsync()
+        /// <summary>
+        /// Opens the player's session if there is none (one at a time). An open still running for another player is
+        /// waited out and this player's own follows: it must not hand back that one's nothing.
+        /// </summary>
+        internal async Task<SessionInfo?> OpenAsync()
         {
+            var asked = subject();
             var session = Session;
-            if (session != null) return Task.FromResult<SessionInfo?>(session);
-            return opening.Run(DoOpen);
+            if (session != null) return session;
+            SessionInfo? result;
+            try { result = await opening.Run(OpenOnce); }
+            catch (Exception) when (asked != null && openedFor != asked && subject() == asked) { result = null; }
+            if (result == null && asked != null && subject() == asked && openedFor != asked) return await opening.Run(OpenOnce);
+            return result;
+        }
+
+        /// <summary>A failed open is tried again by the client's tick, with a growing wait (a server's own wait when it gave one).</summary>
+        async Task<SessionInfo?> OpenOnce()
+        {
+            try
+            {
+                var opened = await DoOpen();
+                if (opened != null)
+                {
+                    openRetryAt = null;
+                    openBackoffMs = 0;
+                }
+                return opened;
+            }
+            catch (Exception err)
+            {
+                var wait = err is KrtuworksException known ? Retry.DelayMs(known, ref openBackoffMs) : (openBackoffMs = Math.Min(300_000, Math.Max(5_000, openBackoffMs * 2)));
+                openRetryAt = clock.ElapsedMilliseconds + wait;
+                throw;
+            }
+        }
+
+        /// <summary>Lets a failed open be tried again at the next tick (back online).</summary>
+        internal void RetryOpenSoon()
+        {
+            if (openRetryAt.HasValue) openRetryAt = 0;
+            openBackoffMs = 0;
         }
 
         async Task<SessionInfo?> DoOpen()
         {
             var owner = subject();
+            openedFor = owner;
             if (owner == null) return null;
             if (current != null && current.Owner != owner) Close();
             if (clientSessionId == null)
@@ -125,12 +171,23 @@ namespace Krtuworks.Internal
             var body = new JObject { ["clientSessionId"] = clientSessionId, ["platform"] = opts.Platform, ["build"] = opts.Build };
             if (opts.Device != null) body["device"] = JObject.FromObject(opts.Device, Newtonsoft.Json.JsonSerializer.Create(Json.Settings));
             if (opts.Locale != null) body["locale"] = opts.Locale;
+            string? usedTicket = null;
             if (platformTicket != null)
             {
-                var ticket = await platformTicket();
-                if (ticket != null) body["platformProof"] = new JObject { ["steamTicket"] = ticket };
+                usedTicket = await platformTicket();
+                if (usedTicket != null) body["platformProof"] = new JObject { ["steamTicket"] = usedTicket };
             }
-            var answer = await api.PlayerAsync("/v1/sessions", new PlayerCall { Method = "POST", Json = body, Owner = owner });
+            Answer answer;
+            try
+            {
+                answer = await api.PlayerAsync("/v1/sessions", new PlayerCall { Method = "POST", Json = body, Owner = owner });
+            }
+            catch (KrtuworksException err) when (err.AuthLayer && usedTicket != null)
+            {
+                // The credentials failed before the call went out: the ticket was never used.
+                CancelTicket?.Invoke(usedTicket);
+                throw;
+            }
             var session = answer.Json?["session"] as JObject;
             if (session == null || subject() != owner) return null;
             current = new SessionInfo { Id = (string?)session["id"] ?? "", Owner = owner, StartedAt = (string?)session["startedAt"] ?? "", PlatformLink = LinkOf(answer.Json?["platformLink"]) };
@@ -154,6 +211,12 @@ namespace Krtuworks.Internal
         /// <summary>Sends the heartbeat when it is due.</summary>
         internal async Task DueAsync()
         {
+            if (openRetryAt.HasValue && clock.ElapsedMilliseconds >= openRetryAt.Value && Session == null && subject() != null && Wanted())
+            {
+                try { await OpenAsync(); }
+                catch (Exception) { /* the failure set the next try */ }
+                return;
+            }
             if (clock.ElapsedMilliseconds < nextHeartbeatAt) return;
             await HeartbeatAsync();
         }
@@ -239,6 +302,8 @@ namespace Krtuworks.Internal
             current = null;
             clientSessionId = null;
             nextHeartbeatAt = long.MaxValue;
+            openRetryAt = null;
+            openBackoffMs = 0;
         }
     }
 }

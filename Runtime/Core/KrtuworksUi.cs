@@ -69,7 +69,7 @@ namespace Krtuworks
             Texts = this.options.Texts ?? new UiTexts();
             Locale = this.options.Locale ?? "en";
             memory = this.options.Memory ?? client.Store;
-            now = this.options.Now ?? (() => DateTimeOffset.Now);
+            now = this.options.Now ?? (() => client.ServerNow.ToLocalTime());
             delay = this.options.Delay ?? client.Delay;
             if (this.options.LinkReminder) client.LinkReminder += OnLinkReminder;
             if (this.options.PlatformSaveConflicts) client.PlatformSaveConflict += OnPlatformSaveConflict;
@@ -99,6 +99,14 @@ namespace Krtuworks
         public async Task<UiResult> EnsurePlayerAsync()
         {
             if (client.Player != null) return UiResult.SignedIn(client.Player);
+            // An app that needs the server on the very first launch: the player connects first, or the game stays out.
+            while (client.State == KrtuworksClient.StateFirstLaunchOffline)
+            {
+                var connect = await Once(new ErrorScreen { Message = Texts.Get("error.offline"), Retry = true });
+                if (connect.Kind != UiAnswerKind.Retry) return UiResult.Offline(OfflineReason.Unavailable);
+                try { await client.RefreshConfigAsync(); }
+                catch (KrtuworksException) { /* still no connection: the screen asks again */ }
+            }
             var blocked = GateProblem();
             if (blocked != null) return await FailOfflineAsync(blocked);
             var until = Json.Read<string>(await memory.GetAsync(UnderageKey));
@@ -296,14 +304,15 @@ namespace Krtuworks
         // ── Saves ─────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Saves <paramref name="bytes"/> to <paramref name="slot"/> over <paramref name="baseVersion"/>; when another device saved first, shows both
-        /// saves and does what the player picks. <see cref="SaveKept.There"/> hands back the other save's bytes for the game to load.
+        /// Saves <paramref name="bytes"/> to <paramref name="slot"/> over <paramref name="baseVersion"/> (none named: no check, the new save wins); when
+        /// another device saved first, shows both saves and does what the player picks. <see cref="SaveKept.There"/> hands back the other save's bytes for the game to load.
         /// </summary>
         public async Task<SaveChoice> SaveAsync(string slot, byte[] bytes, string? baseVersion = null, string? name = null)
         {
             try
             {
-                return new SaveChoice(SaveKept.Here, await client.SaveFileAsync(slot, bytes, baseVersion));
+                var saved = baseVersion == null ? await client.SaveFileAsync(slot, bytes) : await client.SaveFileAsync(slot, bytes, baseVersion);
+                return new SaveChoice(SaveKept.Here, saved);
             }
             catch (KrtuworksException err) when (err.Code == "file_conflict" && CurrentOf(err) != null)
             {

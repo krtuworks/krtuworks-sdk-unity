@@ -87,6 +87,7 @@ namespace Krtuworks
     public sealed class SealedFileStore : FileStore, ISecretStore
     {
         readonly IMasterKey master;
+        readonly object keyGate = new object();
         byte[]? encKey;
         byte[]? macKey;
 
@@ -95,15 +96,19 @@ namespace Krtuworks
             this.master = master;
         }
 
+        /// <summary>Both keys are made together under one lock: a read on another thread never finds one without the other.</summary>
         bool Keys()
         {
-            if (encKey != null) return true;
-            var key = master.GetOrCreate();
-            if (key == null || key.Length != 32) return false;
-            using var hmac = new HMACSHA256(key);
-            encKey = hmac.ComputeHash(Encoding.ASCII.GetBytes("krtuworks-sealed-file:enc"));
-            macKey = hmac.ComputeHash(Encoding.ASCII.GetBytes("krtuworks-sealed-file:mac"));
-            return true;
+            lock (keyGate)
+            {
+                if (encKey != null && macKey != null) return true;
+                var key = master.GetOrCreate();
+                if (key == null || key.Length != 32) return false;
+                using var hmac = new HMACSHA256(key);
+                macKey = hmac.ComputeHash(Encoding.ASCII.GetBytes("krtuworks-sealed-file:mac"));
+                encKey = hmac.ComputeHash(Encoding.ASCII.GetBytes("krtuworks-sealed-file:enc"));
+                return true;
+            }
         }
 
         byte[] Tag(string key, byte[] iv, byte[] ciphertext)

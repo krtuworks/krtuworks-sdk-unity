@@ -5,7 +5,9 @@ import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import java.nio.charset.StandardCharsets;
+import java.security.InvalidKeyException;
 import java.security.KeyStore;
+import java.security.UnrecoverableKeyException;
 import javax.crypto.AEADBadTagException;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -24,10 +26,27 @@ public final class KrtuworksKeystore {
 
     private KrtuworksKeystore() {}
 
+    /** A key that can never be used again (lost after a restore, invalidated by the system) is deleted: a new one replaces it. */
+    private static void forget() {
+        try {
+            KeyStore store = KeyStore.getInstance(PROVIDER);
+            store.load(null);
+            store.deleteEntry(ALIAS);
+        } catch (Exception e) {
+            // The next call tries again.
+        }
+    }
+
     private static SecretKey key(boolean create) throws Exception {
         KeyStore store = KeyStore.getInstance(PROVIDER);
         store.load(null);
-        KeyStore.Entry entry = store.getEntry(ALIAS, null);
+        KeyStore.Entry entry;
+        try {
+            entry = store.getEntry(ALIAS, null);
+        } catch (UnrecoverableKeyException e) {
+            store.deleteEntry(ALIAS);
+            entry = null;
+        }
         if (entry instanceof KeyStore.SecretKeyEntry) return ((KeyStore.SecretKeyEntry) entry).getSecretKey();
         if (!create) return null;
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER);
@@ -54,6 +73,9 @@ public final class KrtuworksKeystore {
             System.arraycopy(iv, 0, out, 0, iv.length);
             System.arraycopy(sealed, 0, out, iv.length, sealed.length);
             return Base64.encodeToString(out, Base64.NO_WRAP);
+        } catch (InvalidKeyException e) {
+            forget();
+            return null;
         } catch (Exception e) {
             return null;
         }
@@ -61,7 +83,7 @@ public final class KrtuworksKeystore {
 
     /**
      * The secret `seal` made here; "" when it can never open on this phone (no Keystore key here, made
-     * with another key, or not sealed text); null when the Keystore failed just now (try again later:
+     * with another key, a key the system invalidated, or not sealed text); null when the Keystore failed just now (try again later:
      * nothing may be thrown away for it).
      */
     public static String open(String sealed) {
@@ -76,6 +98,10 @@ public final class KrtuworksKeystore {
             byte[] plain = cipher.doFinal(in, IV_BYTES, in.length - IV_BYTES);
             return new String(plain, StandardCharsets.UTF_8);
         } catch (AEADBadTagException | IllegalArgumentException e) {
+            return "";
+        } catch (InvalidKeyException e) {
+            // The Keystore key can never be used again: it is replaced, and the text it sealed is gone like on a new phone.
+            forget();
             return "";
         } catch (Exception e) {
             return null;

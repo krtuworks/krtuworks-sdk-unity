@@ -77,19 +77,40 @@ namespace Krtuworks.Internal
             {
                 var err = Wire.ErrorOf(answer);
                 if (err.Code == "account_merged") await identity.MarkMergedAsync(owner, (string?)err.Details["mergedInto"]);
+                if (err.Code == "account_deleted")
+                {
+                    await identity.MarkDeletedAsync(owner);
+                    throw err;
+                }
                 if (err.Code == "token_expired" || err.Code == "token_revoked" || err.Code == "invalid_token") answer = await Attempt(path, call, true, owner);
             }
             if (identity.Generation != generation) throw new KrtuworksException("context_changed", "The player changed while the call ran; it was dropped.");
-            if ((answer.Status >= 300 || answer.Status < 200) && !Accepted(call, answer.Status)) throw Wire.ErrorOf(answer);
+            if ((answer.Status >= 300 || answer.Status < 200) && !Accepted(call, answer.Status))
+            {
+                var refused = Wire.ErrorOf(answer);
+                if (refused.Code == "account_merging") identity.NoteMerging(owner, true);
+                throw refused;
+            }
+            identity.NoteMerging(owner, false);
             return answer;
         }
 
         async Task<Answer> Attempt(string path, PlayerCall call, bool forceRefresh, string owner)
         {
-            var (token, subject) = await identity.CredentialsAsync(forceRefresh);
-            if (subject != owner) throw new KrtuworksException("context_changed", "The player changed while the call ran; it was dropped.");
+            (string Token, string Subject) credentials;
+            try
+            {
+                credentials = await identity.CredentialsAsync(forceRefresh);
+            }
+            catch (KrtuworksException err)
+            {
+                // A failure of the token, not of what the call carries: no queue may drop its item for it.
+                err.AuthLayer = true;
+                throw;
+            }
+            if (credentials.Subject != owner) throw new KrtuworksException("context_changed", "The player changed while the call ran; it was dropped.") { AuthLayer = true };
             var request = new HttpCall { Method = call.Method, Url = Url(path, call.Query), Body = call.Body };
-            request.Headers["authorization"] = $"Bearer {token}";
+            request.Headers["authorization"] = $"Bearer {credentials.Token}";
             request.Headers["x-krtu-build"] = opts.Build;
             foreach (var h in call.Headers ?? new Dictionary<string, string>()) request.Headers[h.Key] = h.Value;
             if (call.Json != null)

@@ -1,7 +1,9 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -119,6 +121,8 @@ namespace Krtuworks.Internal
         /// whole request before it reaches the server). Past it, a save no one heard of is gone.
         /// </summary>
         const long ArrivalWindowMs = 15 * 60_000;
+        /// <summary>SETTINGS and DEVICE_SETTINGS are written at most once per slot in this time; the newest content is the one written.</summary>
+        const long SettingsGapMs = 30_000;
 
         readonly Resolved opts;
         readonly Api api;
@@ -130,6 +134,16 @@ namespace Krtuworks.Internal
         readonly Dictionary<string, int> revisions = new Dictionary<string, int>();
         /// <summary>Orders the saves started in one millisecond.</summary>
         int seq;
+        /// <summary>Ends the waits that retry a save after a rate limit (the client's shutdown).</summary>
+        internal CancellationToken Stop;
+        readonly object settingsGate = new object();
+        readonly Stopwatch monotonic = Stopwatch.StartNew();
+        /// <summary>Per lane: when its next settings write may go.</summary>
+        readonly Dictionary<string, long> settingsNextAt = new Dictionary<string, long>();
+        readonly List<Task> settingsWrites = new List<Task>();
+        CancellationTokenSource settingsNow = new CancellationTokenSource();
+        /// <summary>Lanes with a retry already waiting for a rate limit to pass.</summary>
+        readonly HashSet<string> retrying = new HashSet<string>();
 
         internal Files(Resolved opts, Api api, IKrtuStore store, Func<string?> subject, Func<int> generation, Action onSaved)
         {
@@ -193,7 +207,7 @@ namespace Krtuworks.Internal
 
         internal Task<SlotList> ListAsync() => ListFor(null);
 
-        async Task<SlotList> ListFor(string? owner)
+        internal async Task<SlotList> ListFor(string? owner)
         {
             var answer = await api.PlayerAsync(FilesPath, new PlayerCall { Owner = owner });
             return answer.Json?.ToObject<SlotList>() ?? new SlotList();
@@ -202,7 +216,7 @@ namespace Krtuworks.Internal
         static Dictionary<string, string?> Query(params (string key, string? value)[] pairs) => pairs.ToDictionary(p => p.key, p => p.value);
 
         /// <summary>A slot's current version; null when `ifNoneMatch` (a version id held) is still current.</summary>
-        internal async Task<FileRead?> ReadAsync(string slot, SaveDevice? device, string? ifNoneMatch)
+        internal async Task<FileRead?> ReadAsync(string slot, SaveDevice? device, string? ifNoneMatch, string? owner = null)
         {
             var revisionKey = RevisionKey(slot, device?.Id);
             var revision = Revision(revisionKey);
@@ -210,7 +224,7 @@ namespace Krtuworks.Internal
             foreach (var info in device?.Info ?? new Dictionary<string, string>()) query[info.Key] = info.Value;
             var headers = new Dictionary<string, string>();
             if (ifNoneMatch != null) headers["if-none-match"] = ifNoneMatch;
-            var answer = await api.PlayerAsync(SlotPath(slot), new PlayerCall { Query = query, Headers = headers, Accept = new[] { 304 } });
+            var answer = await api.PlayerAsync(SlotPath(slot), new PlayerCall { Query = query, Headers = headers, Accept = new[] { 304 }, Owner = owner });
             if (answer.Status == 304) return null;
             var etag = answer.Raw.Header("etag");
             return new FileRead
@@ -231,15 +245,18 @@ namespace Krtuworks.Internal
         /// `save_replaced` when a newer save of the slot took its place before it was sent.
         /// </summary>
         /// <param name="conditional">Whether `baseVersion` is meant (null = the slot must be empty); SETTINGS-like slots need neither.</param>
-        internal async Task<FileVersion> SaveAsync(string slot, byte[] data, bool conditional, string? baseVersion, SaveDevice? device)
+        /// <param name="owner">The player the save is for; when another one plays now, nothing is saved (`context_changed`). Default: whoever plays now.</param>
+        /// <param name="coalesce">SETTINGS and DEVICE_SETTINGS: written at most once per slot every 30 seconds, the newest content wins (an older one waiting is replaced).</param>
+        internal async Task<FileVersion> SaveAsync(string slot, byte[] data, bool conditional, string? baseVersion, SaveDevice? device, string? owner = null, bool coalesce = false)
         {
-            var owner = subject() ?? throw new KrtuworksException("signed_out", "No player is signed in.");
+            var player = subject() ?? throw new KrtuworksException("signed_out", "No player is signed in.");
+            if (owner != null && owner != player) throw new KrtuworksException("context_changed", "The player changed; nothing was saved.");
             var revisionKey = RevisionKey(slot, device?.Id);
             revisions[revisionKey] = Revision(revisionKey) + 1;
             var upload = new PendingUpload
             {
                 UploadId = Ids.UuidV4(),
-                Owner = owner,
+                Owner = player,
                 Slot = slot,
                 Device = device?.Id,
                 Base = baseVersion,
@@ -252,7 +269,50 @@ namespace Krtuworks.Internal
                 V = 2,
             };
             await Json.Put(store, UploadKey(upload.UploadId), upload);
+            if (!coalesce) return await Pump(upload, (_, __, ___) => { });
+            var write = WriteSettingsAsync(upload);
+            lock (settingsGate) settingsWrites.Add(write);
+            try { return await write; }
+            finally { lock (settingsGate) settingsWrites.Remove(write); }
+        }
+
+        /// <summary>Waits for the lane's turn (30 s after its last write, or until a flush), then sends; a newer save of the lane replaces this one meanwhile.</summary>
+        async Task<FileVersion> WriteSettingsAsync(PendingUpload upload)
+        {
+            var lane = LaneLock(upload);
+            long wait;
+            CancellationToken flush;
+            lock (settingsGate)
+            {
+                wait = (settingsNextAt.TryGetValue(lane, out var next) ? next : 0) - monotonic.ElapsedMilliseconds;
+                flush = settingsNow.Token;
+            }
+            if (wait > 0)
+            {
+                try { await opts.Delay(TimeSpan.FromMilliseconds(wait), flush); }
+                catch (OperationCanceledException) { /* flushed: the app is pausing or ending, so it goes now */ }
+            }
+            lock (settingsGate) settingsNextAt[lane] = monotonic.ElapsedMilliseconds + SettingsGapMs;
             return await Pump(upload, (_, __, ___) => { });
+        }
+
+        /// <summary>The app pauses or ends: the settings writes that wait for their turn go now, and are waited for.</summary>
+        internal async Task FlushSettingsAsync()
+        {
+            Task[] running;
+            CancellationTokenSource released;
+            lock (settingsGate)
+            {
+                released = settingsNow;
+                settingsNow = new CancellationTokenSource();
+                running = settingsWrites.ToArray();
+            }
+            released.Cancel();
+            foreach (var write in running)
+            {
+                try { await write; }
+                catch (Exception) { /* the caller of that save heard of it */ }
+            }
         }
 
         /// <summary>
@@ -320,7 +380,7 @@ namespace Krtuworks.Internal
                     await Send(upload);
                     return ("saved", null);
                 }
-                catch (KrtuworksException sent) when (!sent.Retryable && sent.Code != "upload_pending")
+                catch (KrtuworksException sent) when (!sent.Retryable && !sent.KeepsQueued && sent.Code != "upload_pending")
                 {
                     return ("refused", sent.Code);
                 }
@@ -373,11 +433,57 @@ namespace Krtuworks.Internal
             }
             catch (KrtuworksException err)
             {
-                if (!err.Retryable) await Forget(upload.UploadId);
+                // Only a refusal of the save itself ends it. A failure that can pass (no answer, a busy server, a frozen app, a merge
+                // or a ban being settled, a token that could not be had) leaves it for a later try; a rate limit schedules that try.
+                if (err.Code == "too_many_writes") RetryLater(upload, err.RetryAfter);
+                else if (!err.Retryable && !err.KeepsQueued && err.Code != "account_deleted") await Forget(upload.UploadId);
                 throw;
             }
             if (answer.Status == 201) return await Done(upload, answer.Json?["file"]?.ToObject<FileVersion>(), null);
             return await Settle(upload, answer.Json);
+        }
+
+        /// <summary>
+        /// A save the server rate-limited is sent again when the limit passes (one wait per lane), not only at the next save or launch.
+        /// </summary>
+        void RetryLater(PendingUpload upload, double? retryAfterSeconds)
+        {
+            var lane = LaneLock(upload);
+            lock (settingsGate)
+            {
+                if (!retrying.Add(lane)) return;
+            }
+            _ = RetryAfterAsync(upload, lane, retryAfterSeconds ?? 10);
+        }
+
+        async Task RetryAfterAsync(PendingUpload upload, string lane, double seconds)
+        {
+            try
+            {
+                await opts.Delay(TimeSpan.FromSeconds(Math.Max(1, seconds) + 0.25), Stop);
+            }
+            catch (OperationCanceledException)
+            {
+                lock (settingsGate) retrying.Remove(lane);
+                return;
+            }
+            lock (settingsGate) retrying.Remove(lane);
+            try
+            {
+                if (await store.GetAsync(UploadKey(upload.UploadId)) == null) return;
+                await Pump(upload, (_, __, ___) => { });
+            }
+            catch (KrtuworksException) { /* a rate limit schedules the next try itself; anything else waits for the next launch or save */ }
+        }
+
+        /// <summary>The player's account is gone: the saves waiting for it are dropped.</summary>
+        internal async Task DropOwnerAsync(string owner)
+        {
+            foreach (var key in await store.KeysAsync(UploadPrefix))
+            {
+                var upload = await Json.Get<PendingUpload>(store, key);
+                if (upload?.Owner == owner) await Forget(upload.UploadId);
+            }
         }
 
         /// <summary>Reads an upload's state (200 again or 202) until it is final.</summary>
@@ -394,7 +500,11 @@ namespace Krtuworks.Internal
                 if (status == "REJECTED")
                 {
                     await Forget(upload.UploadId);
-                    throw new KrtuworksException((string?)current?["code"] ?? "write_failed", "The save was refused.", 409, null, new JObject { ["upload"] = current });
+                    var code = (string?)current?["code"] ?? "write_failed";
+                    var details = new JObject { ["upload"] = current };
+                    // A refusal read back after a lost answer carries no `current`: the slot's version now is what the game's choice screen needs.
+                    if (code == "file_conflict") await AddCurrentAsync(upload, details);
+                    throw new KrtuworksException(code, "The save was refused.", 409, null, details);
                 }
                 if (DateTimeOffset.UtcNow - started > PollLimit)
                     throw new KrtuworksException("upload_pending", "The save is still being written; it is finished on a later launch.", 202, null, new JObject { ["uploadId"] = upload.UploadId });
@@ -405,6 +515,18 @@ namespace Krtuworks.Internal
                 var answer = await api.PlayerAsync($"{SlotPath(upload.Slot)}/uploads/{upload.UploadId}", new PlayerCall { Owner = upload.Owner });
                 current = answer.Json;
             }
+        }
+
+        async Task AddCurrentAsync(PendingUpload upload, JObject details)
+        {
+            try
+            {
+                var list = await ListFor(upload.Owner);
+                var slot = list.Slots.FirstOrDefault(sl => sl.Key == upload.Slot);
+                var version = upload.Device == null ? slot?.File : slot?.Devices.FirstOrDefault(d => d.Device == upload.Device);
+                if (version != null) details["current"] = JObject.FromObject(version);
+            }
+            catch (KrtuworksException) { /* without it the game reads the slot itself */ }
         }
 
         async Task<FileVersion> Done(PendingUpload upload, FileVersion? file, string? versionId)
@@ -453,7 +575,7 @@ namespace Krtuworks.Internal
                 }
                 catch (KrtuworksException err)
                 {
-                    Tell(upload, err.Code == "save_replaced" ? "replaced" : err.Code == "upload_pending" || err.Retryable ? "waiting" : "refused", err.Code);
+                    Tell(upload, err.Code == "save_replaced" ? "replaced" : err.Code == "upload_pending" || err.Retryable || err.KeepsQueued ? "waiting" : "refused", err.Code);
                 }
             }
             return output;
@@ -493,11 +615,11 @@ namespace Krtuworks.Internal
         /// Completes with the waiting version. Not kept in the store: an offer lost is made again on the next sync,
         /// and the server answers `conflict_pending` for one already waiting.
         /// </summary>
-        internal async Task<FileVersion> OfferAsync(string slot, byte[] data, string current, string sessionId)
+        internal async Task<FileVersion> OfferAsync(string slot, byte[] data, string current, string sessionId, string? owner = null)
         {
             var headers = new Dictionary<string, string> { ["idempotency-key"] = Ids.UuidV4(), ["content-type"] = "application/octet-stream", ["if-match"] = current };
             var query = Query(("platform", opts.Platform), ("sessionId", sessionId), ("build", opts.Build));
-            var answer = await api.PlayerAsync($"{SlotPath(slot)}/offer", new PlayerCall { Method = "PUT", Query = query, Headers = headers, Body = data, Accept = new[] { 202 } });
+            var answer = await api.PlayerAsync($"{SlotPath(slot)}/offer", new PlayerCall { Method = "PUT", Query = query, Headers = headers, Body = data, Accept = new[] { 202 }, Owner = owner });
             var started = DateTimeOffset.UtcNow;
             var wait = 1000;
             var state = answer.Json;
@@ -509,9 +631,9 @@ namespace Krtuworks.Internal
                     throw new KrtuworksException("upload_pending", "The offer is still being written; the next sync looks again.", 202);
                 await opts.Delay(TimeSpan.FromMilliseconds(wait), System.Threading.CancellationToken.None);
                 wait = Math.Min(8000, wait * 2);
-                state = (await api.PlayerAsync($"{SlotPath(slot)}/uploads/{(string?)state?["uploadId"]}", new PlayerCall())).Json;
+                state = (await api.PlayerAsync($"{SlotPath(slot)}/uploads/{(string?)state?["uploadId"]}", new PlayerCall { Owner = owner })).Json;
             }
-            var list = await ListAsync();
+            var list = await ListFor(owner);
             return list.Slots.FirstOrDefault(s => s.Key == slot)?.Conflict
                 ?? throw new KrtuworksException("file_not_found", "The offered copy is no longer waiting in the slot.", 404);
         }

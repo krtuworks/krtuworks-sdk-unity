@@ -4,6 +4,37 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.8 - 2026-11-26
+
+### Fixed
+- A failure of the player's token no longer drops what is queued. Before, a refresh the server refused with `app_suspended` (HTTP 400) made the events, bug-report and save queues treat their own item as refused and delete it. Errors raised while getting or refreshing the token are now told apart from a refusal of the body, and every queue keeps its item and backs off.
+- What is queued waits for a refusal that can lift. `app_suspended`, `account_merged`, `account_merging`, `sanctioned`, `account_deletion_pending`, `switched_off` and `module_disabled` keep the event batch, the bug report with its screenshot, the save (a merged account's save stays for `AdoptWaitingSaveAsync` / `DiscardWaitingSaveAsync`) and the progress op, and the queue waits for `Retry-After`, otherwise 15 minutes (the network coming back tries at once). Only a refusal of the body itself drops it. Before, a save refused with one of these codes was deleted.
+- A 401 `account_deleted` signs the player out (`IdentityChange` `signed_out`, `Reason` `account_deleted`) and drops that player's queues; before, the queues retried forever.
+- A bug report's screenshot answered 409 `app_transferring` or `account_merging` is kept and sent again; before it was deleted although the report was accepted. A stored screenshot that cannot be read back costs only the screenshot, and a failure inside one queue no longer stops the others in the same flush.
+- A 200 answer for the remote config that is not a JSON object (a captive portal's page) is a failed fetch: the kept copy stays and nothing is stored. Before, it replaced the kept config with an empty one, which switched every module the owner had turned off back on.
+- A failed session open is tried again (after the server's wait, else a growing wait up to 5 minutes, and at once when the network returns); before, the run went on with no session. An open still running for the previous player no longer hands the next player a session of nothing.
+- Settings saves (`SaveSettingsAsync`) are written at most once per slot every 30 seconds, the newest content wins, and what waits is written when the app pauses or ends. A save the server rate-limited (`too_many_writes`) is sent again when the limit passes instead of at the next save or launch.
+- A save sent again after a lost answer that the server rejected as a conflict now carries the slot's current version in `Details["current"]`, so the choice screen can open.
+- `ui.SaveAsync` without a base version writes without a check; before it failed with `file_conflict` on any slot that already had a save. The save choice screen marks the newer save by the server's clock, not the device's.
+- The platform mirror (Steam Cloud) works for the player it started for: when another player signs in meanwhile, nothing of that sync is read or written for them.
+- A player waiting to be deleted sees "This account is waiting to be deleted" with the account page, not a retry loop.
+- A returning Steam player on a new PC signs in without the age screen: the server decides, and the age screen shows only when it says the Steam account is new. A Steam ticket that was got but never sent (the proof or the credentials failed first) is cancelled.
+- A guest's age answer the server refuses for good (`too_young`, an invalid date) is no longer kept to be sent at every launch, and accepting newer terms updates a kept request.
+- An open level attempt belongs to the player who started it: after a player change `LevelComplete` and `LevelFail` tell nothing under the new player's name.
+- Retry-After given as an HTTP date, the age limit of queued events and the screens' "newer" marks use the server's clock, not the device's. An event made while the device clock was wrong is no longer aged out.
+- Events the store refused to write are kept in memory for the next write instead of being lost.
+- The desktop sign-in's loopback receiver lets go of a connection that sends nothing (a browser's idle pre-connect) after 5 seconds, and cancelling closes it, so the real request behind it is served.
+- A sealed secret file store used by several threads on its first use no longer reads one of its two keys before the other exists.
+- An iOS Keychain item that could not be deleted is reported (`secret_storage_unavailable`) instead of leaving a token that comes back at the next launch. An Android Keystore key that is permanently unusable is replaced by a new one instead of leaving secret storage unavailable for good.
+- `KrtuworksUnity.InitializeAsync` no longer keeps a failed start for good (a missing config), and with Enter Play Mode's domain reload switched off each Play session starts clean instead of returning the last session's client.
+- A player who signed out in another process is told about it (`IdentityChange` `signed_out`) when the SDK next needs their token. Sign-in records nobody came back to are removed when another sign-in starts.
+
+### Added
+- `IdentityChange` types `merging` and `merging_ended`: told once when the server starts answering a player's calls with 409 `account_merging`, and once when the first call is answered after it. Nothing else changes while it lasts.
+- `firstLaunch: "online"` in `krtuworks-config.json`: when there is no player and no kept config and the server cannot be reached at the first launch, `KrtuworksClient.State` is `first_launch_offline` (`StateFirstLaunchOffline`) until a config fetch succeeds; the ready-made screens show a connect screen with Try again. Without the option the first launch stays offline-first (`State` is `ready`).
+- `KrtuworksClient.SaveFileAsync(slot, bytes)` saves a SAVE or PROFILE slot without a check against the slot's current version.
+- `IPlatformTicketCancel`: a platform adapter that can take back a ticket the SDK got and never sent (the Steam adapter does, with `CancelAuthTicket`).
+
 ## 1.0.7 - 2026-11-25
 
 ### Fixed

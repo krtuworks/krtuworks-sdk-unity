@@ -112,6 +112,8 @@ namespace Krtuworks.Internal
         static readonly HashSet<string> ReportRefusedCodes = new HashSet<string> { "report_id_reused" };
         /// <summary>The screenshot can never be taken (too late, too big, not a picture, the report gone); `screenshot_exists` is done.</summary>
         static readonly HashSet<int> ScreenshotRefused = new HashSet<int> { 400, 404, 409, 411, 413, 415 };
+        /// <summary>A 409 that says "not now", not "never": the screenshot is kept and sent again.</summary>
+        static readonly HashSet<string> ScreenshotLater = new HashSet<string> { "app_transferring", "account_merging" };
 
         readonly Resolved opts;
         readonly IKrtuStore store;
@@ -334,6 +336,18 @@ namespace Krtuworks.Internal
                 }
                 try
                 {
+                    byte[]? picture = null;
+                    if (w.Screenshot != null)
+                    {
+                        try { picture = Convert.FromBase64String(w.Screenshot.Bytes); }
+                        catch (FormatException)
+                        {
+                            // A picture that cannot be read back can never be sent: the report goes without it.
+                            w.Screenshot = null;
+                            await Json.Put(store, key, w);
+                            result.Dropped.Add(new BugDropped { ReportId = w.ReportId, Code = "invalid_screenshot", ScreenshotOnly = true });
+                        }
+                    }
                     if (w.BugId == null)
                     {
                         var answer = await api.PlayerAsync("/v1/me/bug-reports", new PlayerCall { Method = "POST", Json = w.Body, Owner = player });
@@ -347,12 +361,12 @@ namespace Krtuworks.Internal
                             await api.PlayerAsync($"/v1/me/bug-reports/{Uri.EscapeDataString(w.BugId)}/screenshot", new PlayerCall
                             {
                                 Method = "PUT",
-                                Body = Convert.FromBase64String(w.Screenshot.Bytes),
+                                Body = picture,
                                 Headers = new Dictionary<string, string> { ["content-type"] = w.Screenshot.Type },
                                 Owner = player,
                             });
                         }
-                        catch (KrtuworksException e) when (ScreenshotRefused.Contains(e.Status))
+                        catch (KrtuworksException e) when (ScreenshotRefused.Contains(e.Status) && !e.KeepsQueued && !ScreenshotLater.Contains(e.Code))
                         {
                             // The report is in: a screenshot it already has is done, one refused for good is let go.
                             if (e.Code != "screenshot_exists") result.Dropped.Add(new BugDropped { ReportId = w.ReportId, Code = e.Code, ScreenshotOnly = true });
@@ -362,22 +376,25 @@ namespace Krtuworks.Internal
                     lock (waitUntil) waitUntil.Remove(w.ReportId);
                     result.Sent += 1;
                 }
-                catch (KrtuworksException e)
+                catch (Exception e)
                 {
-                    if (w.BugId == null && (ReportRefused.Contains(e.Status) || ReportRefusedCodes.Contains(e.Code)))
+                    var failure = e as KrtuworksException;
+                    if (failure != null && w.BugId == null && !failure.KeepsQueued && (ReportRefused.Contains(failure.Status) || ReportRefusedCodes.Contains(failure.Code)))
                     {
                         await store.DeleteAsync(key);
-                        result.Dropped.Add(new BugDropped { ReportId = w.ReportId, Code = e.Code });
+                        lock (waitUntil) waitUntil.Remove(w.ReportId);
+                        result.Dropped.Add(new BugDropped { ReportId = w.ReportId, Code = failure.Code });
                         continue;
                     }
-                    // Anything else (no answer, a busy or closed server, a player in a merge, a ban, the
-                    // module off for now) keeps the report for later.
-                    if (e.Code != "context_changed")
+                    // Anything else (no answer, a busy or closed server, a player in a merge, a ban, the module off for now,
+                    // a token that could not be had, a store that failed) keeps the report for later.
+                    var code = failure?.Code ?? "network_error";
+                    if (code != "context_changed")
                     {
-                        var wait = e.RetryAfter.HasValue ? (long)(e.RetryAfter.Value * 1000) : RetryMs;
+                        var wait = failure == null ? RetryMs : failure.RetryAfter.HasValue ? (long)(failure.RetryAfter.Value * 1000) : failure.Waiting ? Retry.WaitingMs : RetryMs;
                         lock (waitUntil) waitUntil[w.ReportId] = now + wait;
                     }
-                    result.StoppedBy = e.Code;
+                    result.StoppedBy = code;
                     return result;
                 }
             }
@@ -417,6 +434,19 @@ namespace Krtuworks.Internal
         internal void ResetBackoff()
         {
             lock (waitUntil) waitUntil.Clear();
+        }
+
+        /// <summary>The player's account is gone: their waiting reports, history and fixed-record are dropped.</summary>
+        internal async Task DropAsync(string who)
+        {
+            lock (events) events.RemoveAll(e => e.Owner == who);
+            lock (logLines)
+            {
+                logLines.RemoveAll(l => l.Owner == who);
+                logChars = logLines.Sum(l => l.Item.Length + 1);
+            }
+            foreach (var key in await store.KeysAsync(Prefix(who))) await store.DeleteAsync(key);
+            await store.DeleteAsync(FixedKey(who));
         }
     }
 }

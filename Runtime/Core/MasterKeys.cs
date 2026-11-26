@@ -77,7 +77,7 @@ namespace Krtuworks
     }
 
     /// <summary>
-    /// Linux and Steam Deck (the owner chose one way for desktop and game mode alike): the sealing key
+    /// Linux and Steam Deck (one way for desktop and game mode alike): the sealing key
     /// is bound to this machine, this user and this app (`/etc/machine-id`, the uid, the app id), and the
     /// sealed files are readable by this user only (0600). Copied to another machine or user, they do not
     /// open. A machine without a machine id keeps a random key in an owner-only file instead.

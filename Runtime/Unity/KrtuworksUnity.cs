@@ -35,7 +35,45 @@ namespace Krtuworks.Unity
         /// <summary>The SDK once initialized (null before).</summary>
         public static KrtuworksClient? Client { get; private set; }
 
-        public static Task<KrtuworksClient> InitializeAsync(KrtuworksUnityOptions? options = null) => starting ??= Start(options ?? new KrtuworksUnityOptions());
+        /// <summary>
+        /// Starts the SDK once; every call gets the same client. A start that failed (a missing config, say) is not kept: the next call tries again.
+        /// </summary>
+        public static Task<KrtuworksClient> InitializeAsync(KrtuworksUnityOptions? options = null)
+        {
+            if (starting != null) return starting;
+            var attempt = Start(options ?? new KrtuworksUnityOptions());
+            starting = attempt;
+            _ = ForgetIfFailed(attempt);
+            return attempt;
+        }
+
+        static async Task ForgetIfFailed(Task<KrtuworksClient> attempt)
+        {
+            try { await attempt; }
+            catch (Exception)
+            {
+                if (starting == attempt) starting = null;
+            }
+        }
+
+        /// <summary>
+        /// With Enter Play Mode's domain reload switched off, statics outlive a Play session: the next session must not get the
+        /// client of the last one (its hidden object is gone), so each session starts clean and the old client is shut down.
+        /// </summary>
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        static void ResetForNewSession()
+        {
+            var old = Client;
+            starting = null;
+            Client = null;
+            if (old != null) _ = ShutDownQuietly(old);
+        }
+
+        static async Task ShutDownQuietly(KrtuworksClient client)
+        {
+            try { await client.ShutdownAsync(); }
+            catch (Exception) { /* the last session's client: nothing to tell */ }
+        }
 
         static bool Web => Application.platform == RuntimePlatform.WebGLPlayer;
 

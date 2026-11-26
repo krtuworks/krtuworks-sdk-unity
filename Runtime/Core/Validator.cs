@@ -53,6 +53,8 @@ namespace Krtuworks
         /// <summary>The server takes one write per slot per 10 s; the validator sits out a wait of at most WriteWaitSeconds.</summary>
         const double WriteLimitSeconds = 10;
         const double WriteWaitSeconds = 15;
+        /// <summary>How many half seconds the save sent again by the SDK is waited for.</summary>
+        const int SentAgainChecks = 20;
 
         /// <summary>The event the validator sends: the first family whose module is on.</summary>
         static readonly (string Module, string Type, object Data)[] Probes =
@@ -258,13 +260,13 @@ namespace Krtuworks
                     }
                     catch (KrtuworksException err) when (err.Code == "too_many_writes" && (err.RetryAfter ?? WriteLimitSeconds) <= WriteWaitSeconds)
                     {
-                        // A slot takes one write per 10 seconds: a run right after another waits and sends the same save again.
-                        // An older save of this slot left by another run is replaced by this one; only this one's outcome counts.
+                        // A slot takes one write per 10 seconds: a run right after another waits. The SDK sends the same save again by itself
+                        // when the limit passes (same upload id, same bytes, an older save of this slot replaced); the read back below tells.
                         Func<TimeSpan, CancellationToken, Task> delay = options.Delay ?? Task.Delay;
                         await delay(TimeSpan.FromSeconds((err.RetryAfter ?? WriteLimitSeconds) + 0.25), CancellationToken.None);
-                        var resent = (await k.ResumeFilesAsync()).Where(u => u.Slot == slot.Key && u.Outcome != "replaced").ToList();
-                        var refused = resent.FirstOrDefault(u => u.Outcome != "saved");
-                        if (refused != null || resent.Count == 0) return Check("cloud_save", "FAILED", refused?.Code ?? "not sent");
+                        var player = k.Player?.Subject;
+                        for (var i = 0; i < SentAgainChecks && player != null && (await k.WaitingSavesAsync(player)).Any(w => w.Slot == slot.Key); i++)
+                            await delay(TimeSpan.FromMilliseconds(500), CancellationToken.None);
                     }
                     var back = await k.ReadFileAsync(slot.Key);
                     return back != null && back.Bytes.SequenceEqual(bytes) ? null : Check("cloud_save", "FAILED", $"The save read back from {slot.Key} is not the one written.");
