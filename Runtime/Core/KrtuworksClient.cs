@@ -133,6 +133,7 @@ namespace Krtuworks
         readonly RemoteConfig config;
         readonly Files files;
         readonly ProgressionTracker levels;
+        readonly PositionSampler positions;
         readonly BugReports bugs;
         readonly PresenceKeeper presence;
         readonly EntitlementKeeper licences;
@@ -185,6 +186,7 @@ namespace Krtuworks
         KrtuworksClient(KrtuworksOptions o)
         {
             options = Resolved.From(o);
+            positions = new PositionSampler(options.PositionSampleSeconds);
             store = o.Store ?? new MemoryStore();
             var secrets = o.Secrets ?? throw new ArgumentException("Secrets is the platform's secret store (tokens and the device key)");
             http = o.Http ?? new HttpClientTransport();
@@ -377,6 +379,7 @@ namespace Krtuworks
         void ForgetPlayer()
         {
             licences.Forget();
+            positions.Reset();
             experiments = new Dictionary<string, JToken?>();
             optedOut = false;
         }
@@ -569,6 +572,28 @@ namespace Krtuworks
             if (!string.IsNullOrEmpty(place?.Level)) data["level"] = place!.Level;
             return Track("death", data, position);
         }
+
+        /// <summary>
+        /// Where the player is now; call it as often as you like (every frame is fine). At most one `position_sample`
+        /// goes out per <see cref="KrtuworksOptions.PositionSampleSeconds"/> of active play, carrying the seconds since
+        /// the one before, with the level in play. Games only, with the positions module on; returns whether a sample was kept.
+        /// </summary>
+        public bool SamplePosition(EventPosition position)
+        {
+            if (!options.Game) return false;
+            if (position == null || (position.Space != "world" && position.Space != "screen") || string.IsNullOrEmpty(position.Area))
+                throw new ArgumentException("position is {Space: world|screen, Area, X, Y, Z?}");
+            if (!IsFinite(position.X) || !IsFinite(position.Y) || !IsFinite(position.Z ?? 0)) throw new ArgumentException("position X, Y and Z are finite numbers");
+            var seconds = positions.Due(sessions.ActiveSeconds);
+            if (seconds == null) return false;
+            var place = levels.InPlay;
+            var data = new JObject { ["seconds"] = seconds.Value };
+            if (!string.IsNullOrEmpty(place?.World)) data["world"] = place!.World;
+            if (!string.IsNullOrEmpty(place?.Level)) data["level"] = place!.Level;
+            return Track("position_sample", data, position);
+        }
+
+        static bool IsFinite(double n) => !double.IsNaN(n) && !double.IsInfinity(n);
 
         /// <summary>An error the game caught, as the errors family tells it (kind: exception, crash, assert, other).</summary>
         public bool Error(Exception err, string kind = "exception", string? fingerprint = null, bool handled = true) =>

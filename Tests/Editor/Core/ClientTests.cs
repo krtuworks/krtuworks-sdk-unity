@@ -196,7 +196,8 @@ namespace Krtuworks.Tests
                 var game = type == null;
                 Assert.That(krtu.AppType, Is.EqualTo(type ?? "GAME"));
                 Assert.That(died, Is.EqualTo(game));
-                Assert.That((krtu.ModuleStates()["progression"], krtu.ModuleStates()["combat"], krtu.ModuleStates()["ui"]), Is.EqualTo((game, game, true)));
+                Assert.That((krtu.ModuleStates()["progression"], krtu.ModuleStates()["combat"], krtu.ModuleStates()["positions"], krtu.ModuleStates()["ui"]), Is.EqualTo((game, game, game, true)));
+                Assert.That(Modules.Of("position_sample"), Is.EqualTo("positions"));
                 Assert.That(sent.Select(e => (string?)e["type"]), Is.EqualTo(game ? new[] { "progression", "death", "progression", "screen_view" } : new[] { "screen_view" }));
                 if (!game)
                 {

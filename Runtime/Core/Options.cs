@@ -62,6 +62,8 @@ namespace Krtuworks
         public string? Locale;
         /// <summary>Opens a session and keeps it alive. Default true.</summary>
         public bool Sessions = true;
+        /// <summary>How often <see cref="KrtuworksClient.SamplePosition"/> tells where the player is, in seconds (1-600). Default 10.</summary>
+        public int? PositionSampleSeconds;
         public string IdOrigin = "https://id.krtuworks.com";
         public string DevOrigin = "https://dev.krtuworks.com";
         /// <summary>
@@ -202,6 +204,7 @@ namespace Krtuworks.Internal
         internal DeviceInfo? Device;
         internal string? Locale;
         internal bool Sessions;
+        internal int PositionSampleSeconds;
         /// <summary>The app needs the server on the very first launch (`firstLaunch: "online"`).</summary>
         internal bool FirstLaunchOnline;
         internal Func<TimeSpan, System.Threading.CancellationToken, System.Threading.Tasks.Task> Delay = System.Threading.Tasks.Task.Delay;
@@ -240,6 +243,7 @@ namespace Krtuworks.Internal
                 Device = o.Device,
                 Locale = o.Locale,
                 Sessions = o.Sessions,
+                PositionSampleSeconds = PositionSampler.Interval(o.PositionSampleSeconds),
                 FirstLaunchOnline = string.Equals(o.Config.FirstLaunch, "online", StringComparison.OrdinalIgnoreCase),
                 Delay = o.Delay ?? System.Threading.Tasks.Task.Delay,
             };
@@ -254,6 +258,7 @@ namespace Krtuworks.Internal
             ["screen_view"] = "ui", ["button"] = "ui", ["tutorial"] = "ui",
             ["progression"] = "progression",
             ["death"] = "combat", ["damage"] = "combat",
+            ["position_sample"] = "positions",
             ["economy"] = "economy", ["balance"] = "economy",
             ["item"] = "items", ["interaction"] = "items",
             ["performance"] = "performance",

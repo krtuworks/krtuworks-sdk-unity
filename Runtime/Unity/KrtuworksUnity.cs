@@ -18,6 +18,8 @@ namespace Krtuworks.Unity
         public IPlatformServices? PlatformServices;
         /// <summary>Opens a session and keeps it alive. Default true.</summary>
         public bool Sessions = true;
+        /// <summary>How often <c>Client.SamplePosition</c> tells where the player is, in seconds (1-600). Default 10.</summary>
+        public int? PositionSampleSeconds;
         /// <summary>The app's krtuworks-config.json; by default the TextAsset <c>Resources/krtuworks-config</c>.</summary>
         public string? ConfigJson;
     }
@@ -103,6 +105,7 @@ namespace Krtuworks.Unity
                 Device = DeviceDescription(),
                 Locale = Locale(),
                 Sessions = options.Sessions,
+                PositionSampleSeconds = options.PositionSampleSeconds,
                 Delay = KrtuworksRunner.Delay,
             };
         }

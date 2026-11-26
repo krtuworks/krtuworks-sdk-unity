@@ -37,6 +37,7 @@ namespace Krtuworks.Internal
         {
             "sessions", "progression", "combat", "economy", "items", "ui", "performance", "settings", "errors",
             "bugReports", "achievements", "stats", "leaderboards", "presence", "cloudSave", "remoteConfig", "abTests", "customEvents",
+            "positions",
         };
 
         readonly Resolved opts;
@@ -79,7 +80,7 @@ namespace Krtuworks.Internal
         }
 
         /// <summary>The modules only a game has: levels (progression) and deaths (combat).</summary>
-        static readonly string[] GameModules = { "progression", "combat" };
+        static readonly string[] GameModules = { "progression", "combat", "positions" };
 
         /// <summary>A module the owner switched off makes nothing; a switch never set is on. An app that is not a game has no game-only modules.</summary>
         internal bool ModuleOn(string module)
