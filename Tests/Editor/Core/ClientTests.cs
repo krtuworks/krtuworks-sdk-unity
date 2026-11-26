@@ -1064,5 +1064,99 @@ namespace Krtuworks.Tests
                 await tab1.ShutdownAsync();
             }
         }
+
+        static JObject Groups(int value) => new JObject
+        {
+            ["experiments"] = new JArray(new JObject { ["key"] = "exp_hard", ["configKey"] = "difficulty", ["group"] = "B", ["value"] = value }),
+        };
+
+        [Test]
+        public async Task AnAbGroupsValueIsUsedOnlyWhileTheAbModuleIsOn_ControlWithTheModuleOnTheGroupWins()
+        {
+            foreach (var abOn in new[] { true, false })
+            {
+                var server = new FakeServer();
+                server.GuestRoutes();
+                var config = new JObject { ["difficulty"] = 100 };
+                if (!abOn) config["modules"] = new JObject { ["abTests"] = false };
+                server.ConfigRoute(config);
+                server.AcceptEvents(new List<JObject>());
+                server.On("GET", "/v1/me/experiments", _ => FakeServer.Ok(Groups(200)));
+                var krtu = await KrtuworksClient.InitializeAsync(server.Options());
+                await krtu.RefreshConfigAsync();
+                await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+                await krtu.ReadyAsync();
+                await krtu.RefreshExperimentsAsync();
+                Assert.That(krtu.Value("difficulty", 0), Is.EqualTo(abOn ? 200 : 100));
+                await krtu.ShutdownAsync();
+            }
+        }
+
+        [Test]
+        public async Task AnotherPlayerDoesNotInheritTheLastPlayersAbValuesOrStatisticsChoice_ControlTheirOwnAnswersApply()
+        {
+            const string b = "pw_other_bbbbbbbbbbbb";
+            var server = new FakeServer();
+            server.GuestRoutes();
+            server.ConfigRoute(new JObject { ["difficulty"] = 100 });
+            server.AcceptEvents(new List<JObject>());
+            var optedOut = true;
+            server.On("GET", "/v1/me/telemetry-opt-out", _ => FakeServer.Ok(new JObject { ["optedOut"] = optedOut, ["updatedAt"] = null }));
+            var groupValue = 200;
+            server.On("GET", "/v1/me/experiments", _ => FakeServer.Ok(Groups(groupValue)));
+            var krtu = await KrtuworksClient.InitializeAsync(server.Options());
+            await krtu.RefreshConfigAsync();
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            await krtu.ReadyAsync();
+            await krtu.RefreshExperimentsAsync();
+            Assert.That(krtu.Value("difficulty", 0), Is.EqualTo(200));
+            Assert.That(krtu.Track("button", new { name = "x" }), Is.False, "A turned statistics off");
+
+            await krtu.SignOutAsync();
+            server.On("POST", "/oidc/token", _ => FakeServer.Ok(FakeServer.TokenAnswer(b)));
+            // B's choice cannot be read (no answer): B has none kept on this device, so B is on.
+            server.Offline.Add("/v1/me/telemetry-opt-out");
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            await krtu.ReadyAsync();
+            Assert.That(krtu.Player?.Subject, Is.EqualTo(b));
+            Assert.That(krtu.Value("difficulty", 0), Is.EqualTo(100), "A's group is gone");
+            Assert.That(krtu.Track("button", new { name = "x" }), Is.True, "A's choice is gone");
+
+            server.Offline.Remove("/v1/me/telemetry-opt-out");
+            groupValue = 150;
+            await krtu.RefreshExperimentsAsync();
+            Assert.That(krtu.Value("difficulty", 0), Is.EqualTo(150), "B's own group");
+            Assert.That(await krtu.GetTelemetryOptOutAsync(), Is.True, "B's own choice");
+            await krtu.ShutdownAsync();
+        }
+
+        [Test]
+        public async Task ASessionOpenStillOnItsWayWhenTheSdkShutsDownDoesNotComeBack_TheLateSessionIsEnded()
+        {
+            var server = new FakeServer();
+            server.GuestRoutes();
+            server.ConfigRoute(new JObject());
+            server.AcceptEvents(new List<JObject>());
+            var release = new TaskCompletionSource<bool>();
+            server.OnAsync("POST", "/v1/sessions", async _ =>
+            {
+                await release.Task;
+                return new Reply
+                {
+                    Status = 201,
+                    Json = new JObject { ["session"] = new JObject { ["id"] = "ses_aaaaaaaaaaaaaaaaaaaa", ["startedAt"] = Clock.IsoNow() }, ["heartbeatSeconds"] = 1, ["serverTime"] = Clock.IsoNow() },
+                };
+            });
+            server.OnPrefix("POST", "/v1/sessions/", _ => FakeServer.Ok(new JObject { ["nextHeartbeatSeconds"] = 1 }));
+            var krtu = await KrtuworksClient.InitializeAsync(server.Options(extra: o => o.Sessions = true));
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            while (server.Count("POST", "/v1/sessions") == 0) await Task.Delay(5);
+            await krtu.ShutdownAsync();
+            release.SetResult(true);
+            await krtu.ReadyAsync();
+            await Task.Delay(1500);
+            Assert.That(server.Count("POST", "/v1/sessions/ses_aaaaaaaaaaaaaaaaaaaa/heartbeat"), Is.Zero, "no heartbeat after shutdown");
+            Assert.That(server.Count("POST", "/v1/sessions/ses_aaaaaaaaaaaaaaaaaaaa/end"), Is.EqualTo(1), "the session the late answer named is ended");
+        }
     }
 }

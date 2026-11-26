@@ -70,6 +70,8 @@ namespace Krtuworks.Internal
         /// <summary>When a failed open is tried again (null: none failed).</summary>
         long? openRetryAt;
         long openBackoffMs;
+        /// <summary>Moves on every <see cref="Close"/>: an answer that arrives after it belongs to a session nobody wants any more.</summary>
+        int generation;
 
         internal SessionKeeper(Resolved opts, Api api, Func<string?> subject, Func<Task<string?>>? platformTicket)
         {
@@ -162,6 +164,7 @@ namespace Krtuworks.Internal
             openedFor = owner;
             if (owner == null) return null;
             if (current != null && current.Owner != owner) Close();
+            var openedIn = generation;
             if (clientSessionId == null)
             {
                 // A new session (not an open sent again after a lost answer): its time in use starts now.
@@ -189,6 +192,13 @@ namespace Krtuworks.Internal
                 throw;
             }
             var session = answer.Json?["session"] as JObject;
+            if (session != null && generation != openedIn)
+            {
+                // Closed while the open was on its way (the SDK shut down, the player left): the server's session ends now.
+                var lateId = (string?)session["id"];
+                if (!string.IsNullOrEmpty(lateId)) _ = EndQuietly(lateId!, owner);
+                return null;
+            }
             if (session == null || subject() != owner) return null;
             current = new SessionInfo { Id = (string?)session["id"] ?? "", Owner = owner, StartedAt = (string?)session["startedAt"] ?? "", PlatformLink = LinkOf(answer.Json?["platformLink"]) };
             if (OnEntitlements != null)
@@ -221,10 +231,17 @@ namespace Krtuworks.Internal
             await HeartbeatAsync();
         }
 
+        async Task EndQuietly(string id, string owner)
+        {
+            try { await api.PlayerAsync($"/v1/sessions/{id}/end", new PlayerCall { Method = "POST", Json = new JObject { ["activeSeconds"] = 0 }, Owner = owner }); }
+            catch (KrtuworksException) { /* the server times it out */ }
+        }
+
         internal async Task HeartbeatAsync()
         {
             var session = Session;
             if (session == null) return;
+            var beatIn = generation;
             nextHeartbeatAt = clock.ElapsedMilliseconds + heartbeatSeconds * 1000L;
             try
             {
@@ -240,7 +257,7 @@ namespace Krtuworks.Internal
                     nextHeartbeatAt = clock.ElapsedMilliseconds + heartbeatSeconds * 1000L;
                 }
             }
-            catch (KrtuworksException err) when (err.Code == "session_ended" || err.Code == "session_not_found")
+            catch (KrtuworksException err) when ((err.Code == "session_ended" || err.Code == "session_not_found") && generation == beatIn)
             {
                 // The server closed it (30 minutes without a heartbeat): a new one, with a new id.
                 current = null;
@@ -299,6 +316,7 @@ namespace Krtuworks.Internal
         /// <summary>Forgets the session without telling the server (the player changed: it times out there).</summary>
         internal void Close()
         {
+            generation++;
             current = null;
             clientSessionId = null;
             nextHeartbeatAt = long.MaxValue;

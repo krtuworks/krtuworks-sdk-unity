@@ -338,6 +338,7 @@ namespace Krtuworks
 
         void OnIdentityChanged(IdentityChange change)
         {
+            if (stopping.IsCancellationRequested) return;
             if (change.Type == "merging" || change.Type == "merging_ended")
             {
                 // Only the game is told: the player and the queues are as they were.
@@ -351,7 +352,7 @@ namespace Krtuworks
                 sessions.Close();
                 sessionOwner = null;
                 presence.PlayerChanged(null);
-                licences.Forget();
+                ForgetPlayer();
             }
             else
             {
@@ -359,7 +360,7 @@ namespace Krtuworks
                 if (sessionOwner != change.Player?.Subject)
                 {
                     sessions.Close();
-                    licences.Forget();
+                    ForgetPlayer();
                 }
                 sessionOwner = change.Player?.Subject;
                 presence.PlayerChanged(sessionOwner);
@@ -370,6 +371,14 @@ namespace Krtuworks
             }
             try { IdentityChanged?.Invoke(change); }
             catch (Exception) { /* the app's listener */ }
+        }
+
+        /// <summary>What the last player's answers left in memory: the next player starts from the app's own values.</summary>
+        void ForgetPlayer()
+        {
+            licences.Forget();
+            experiments = new Dictionary<string, JToken?>();
+            optedOut = false;
         }
 
         /// <summary>The player's account is gone: what waited on this device for it can never be taken.</summary>
@@ -395,6 +404,7 @@ namespace Krtuworks
         /// </summary>
         async Task Settle()
         {
+            if (stopping.IsCancellationRequested) return;
             var player = identity.Player;
             if (player == null)
             {
@@ -407,6 +417,7 @@ namespace Krtuworks
             await Quietly(SettleMerges(player.Subject));
             await Quietly(ReadOptOut());
             await Quietly(licences.EnsureLoadedAsync());
+            if (stopping.IsCancellationRequested) return;
             if (options.Sessions && config.ModuleOn("sessions")) await Quietly(sessions.OpenAsync());
             if (options.Game && options.Platform == "STEAM") await Quietly(licences.RefreshAsync());
             await Quietly(files.ResumeAsync());
@@ -635,12 +646,15 @@ namespace Krtuworks
 
         async Task ReadOptOut()
         {
-            var kept = await store.GetAsync(OptOutKey);
-            if (kept != null) optedOut = kept == "true";
+            var key = OptOutKey;
+            // A player with nothing kept on this device is on until the server says otherwise.
+            optedOut = await store.GetAsync(key) == "true";
             if (identity.Player == null) return;
             var answer = await api.PlayerAsync("/v1/me/telemetry-opt-out", new PlayerCall());
+            // Another player came in while the answer was on its way: it is not theirs.
+            if (OptOutKey != key) return;
             optedOut = answer.Json?["optedOut"]?.Type == JTokenType.Boolean && (bool)answer.Json["optedOut"]!;
-            await store.SetAsync(OptOutKey, optedOut ? "true" : "false");
+            await store.SetAsync(key, optedOut ? "true" : "false");
         }
 
         // ── Progress ──────────────────────────────────────────────────────────
@@ -919,14 +933,16 @@ namespace Krtuworks
         /// <summary>The player's A/B groups; their values take over the config's (<see cref="Value"/>).</summary>
         public async Task<List<Experiment>> RefreshExperimentsAsync()
         {
+            var subject = identity.Player?.Subject;
             var answer = await api.PlayerAsync("/v1/me/experiments", new PlayerCall());
             var list = (answer.Json?["experiments"] as JArray)?.ToObject<List<Experiment>>() ?? new List<Experiment>();
-            experiments = list.ToDictionary(e => e.ConfigKey, e => e.Value);
+            // Another player came in while the answer was on its way: their groups are not these.
+            if (identity.Player?.Subject == subject) experiments = list.ToDictionary(e => e.ConfigKey, e => e.Value);
             return list;
         }
 
-        /// <summary>A remote config value, the player's A/B group's when one varies it.</summary>
-        public JToken? Value(string key) => experiments.TryGetValue(key, out var value) ? value : config.Get(key);
+        /// <summary>A remote config value, the player's A/B group's when one varies it (only while the A/B module is on).</summary>
+        public JToken? Value(string key) => config.ModuleOn("abTests") && experiments.TryGetValue(key, out var value) ? value : config.Get(key);
 
         /// <summary>A remote config value as `T`, or `fallback` when the owner set none (or it is not a `T`).</summary>
         public T Value<T>(string key, T fallback)

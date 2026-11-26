@@ -4,6 +4,13 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.9 - 2026-11-26
+
+### Fixed
+- An A/B group's value (`Value`) is used only while the `abTests` module is on; switching the module off now gives the config's own value.
+- A new player starts without the last player's A/B values and statistics choice (an answer that arrives after the player changed is not applied); before, `Value` and `Track` kept the previous player's until fresh answers came.
+- `ShutdownAsync` while a session open is still on its way: the late answer no longer brings the session back, and the session it names is ended.
+
 ## 1.0.8 - 2026-11-26
 
 ### Fixed
