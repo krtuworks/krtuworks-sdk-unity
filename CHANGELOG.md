@@ -4,6 +4,12 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.10 - 2026-11-26
+
+### Fixed
+- Two settings saves started back to back can no longer land in the wrong order. Before, a large save started first could be stored after a smaller save started later, and the older settings replaced the newer ones on the server.
+- Phone sign-in on Android: a late return from an earlier sign-in is no longer taken as the answer to the sign-in now waiting. Before, only the app's return scheme was checked, so the earlier sign-in's return could complete the new one with the wrong result.
+
 ## 1.0.9 - 2026-11-26
 
 ### Fixed

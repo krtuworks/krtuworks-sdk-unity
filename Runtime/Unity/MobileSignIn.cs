@@ -20,6 +20,8 @@ namespace Krtuworks.Unity
 
         static TaskCompletionSource<string>? pending;
         static string? waitingScheme;
+        /// <summary>The `state` of the sign-in waiting: a late return of an earlier sign-in carries another one.</summary>
+        static string? waitingState;
 
 #if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal")]
@@ -35,6 +37,7 @@ namespace Krtuworks.Unity
             var started = new TaskCompletionSource<string>();
             pending = started;
             waitingScheme = scheme;
+            waitingState = StateOf(url);
             cancel.Register(() =>
             {
                 if (pending != started) return;
@@ -61,13 +64,36 @@ namespace Krtuworks.Unity
         /// <summary>The address the sign-in came back to, or `error:cancelled` / `error:<reason>`.</summary>
         internal static void Finish(string result)
         {
+            if (!result.StartsWith("error:", StringComparison.Ordinal) && !BelongsToWaiting(result)) return;
             var finished = pending;
             pending = null;
             waitingScheme = null;
+            waitingState = null;
             if (finished == null) return;
             if (result == "error:cancelled") finished.TrySetCanceled();
             else if (result.StartsWith("error:", StringComparison.Ordinal)) finished.TrySetException(new KrtuworksException("sign_in_failed", $"The sign-in did not finish: {result.Substring(6)}"));
             else finished.TrySetResult(result);
+        }
+
+        /// <summary>A return address is the waiting sign-in's unless it carries another sign-in's `state`.</summary>
+        internal static bool BelongsToWaiting(string address)
+        {
+            var state = StateOf(address);
+            return waitingState == null || state == null || state == waitingState;
+        }
+
+        /// <summary>The `state` in an address's query, or null.</summary>
+        internal static string? StateOf(string address)
+        {
+            var start = address.IndexOf('?');
+            if (start < 0) return null;
+            var end = address.IndexOf('#', start);
+            var query = end < 0 ? address.Substring(start + 1) : address.Substring(start + 1, end - start - 1);
+            foreach (var part in query.Split('&'))
+            {
+                if (part.StartsWith("state=", StringComparison.Ordinal)) return Uri.UnescapeDataString(part.Substring(6).Replace('+', ' '));
+            }
+            return null;
         }
 
         /// <summary>The app came back to the foreground: on Android, no address soon after means the browser was closed.</summary>

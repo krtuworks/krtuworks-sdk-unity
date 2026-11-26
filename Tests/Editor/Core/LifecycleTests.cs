@@ -461,6 +461,44 @@ namespace Krtuworks.Tests
             await krtu.ShutdownAsync();
         }
 
+        /// <summary>A store whose writes of large values take longer, as a real disk does.</summary>
+        sealed class SlowLargeStore : IKrtuStore
+        {
+            readonly MemoryStore inner = new MemoryStore();
+            public Task<string?> GetAsync(string key) => inner.GetAsync(key);
+            public async Task SetAsync(string key, string value)
+            {
+                if (value.Length > 1_000_000) await Task.Delay(300);
+                await inner.SetAsync(key, value);
+            }
+            public Task DeleteAsync(string key) => inner.DeleteAsync(key);
+            public Task<IReadOnlyList<string>> KeysAsync(string prefix) => inner.KeysAsync(prefix);
+        }
+
+        [Test]
+        public async Task ALargeSaveStoredAfterASmallerNewerOneNeverLandsAfterIt_ControlSavesAwaitedInTurnGoInTurn()
+        {
+            var server = new FakeServer();
+            var puts = new List<string>();
+            server.On("PUT", "/v1/apps/buried/files/settings", call =>
+            {
+                lock (puts) puts.Add(call.Raw.Length > 1000 ? "large" : Encoding.UTF8.GetString(call.Raw));
+                return new Reply { Status = 201, Json = new JObject { ["file"] = FileAnswer("settings") } };
+            });
+            var krtu = await Start(server, extra: o => o.Store = new SlowLargeStore());
+            var large = new byte[2 * 1024 * 1024];
+            var older = krtu.SaveFileAsync("settings", large);
+            var newer = krtu.SaveFileAsync("settings", Bytes("B"));
+            try { await older; } catch (KrtuworksException e) { Assert.That(e.Code, Is.EqualTo("save_replaced")); }
+            await newer;
+            Assert.That(puts.Last(), Is.EqualTo("B"), "the newest content is the last written");
+
+            await krtu.SaveFileAsync("settings", Bytes("C"));
+            await krtu.SaveFileAsync("settings", large);
+            Assert.That(puts.Last(), Is.EqualTo("large"), "control: awaited in turn, the later save is the last written");
+            await krtu.ShutdownAsync();
+        }
+
         [Test]
         public async Task ARateLimitedSaveGoesAgainWhenTheLimitPasses_ControlARefusedBodyDoesNot()
         {

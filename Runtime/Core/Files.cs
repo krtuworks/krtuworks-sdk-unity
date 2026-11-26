@@ -141,6 +141,8 @@ namespace Krtuworks.Internal
         /// <summary>Per lane: when its next settings write may go.</summary>
         readonly Dictionary<string, long> settingsNextAt = new Dictionary<string, long>();
         readonly List<Task> settingsWrites = new List<Task>();
+        /// <summary>Per lane: the saves still being stored, so they join the lane in the order they were made.</summary>
+        readonly Dictionary<string, Task> entering = new Dictionary<string, Task>();
         CancellationTokenSource settingsNow = new CancellationTokenSource();
         /// <summary>Lanes with a retry already waiting for a rate limit to pass.</summary>
         readonly HashSet<string> retrying = new HashSet<string>();
@@ -268,12 +270,46 @@ namespace Krtuworks.Internal
                 Seq = System.Threading.Interlocked.Increment(ref seq),
                 V = 2,
             };
+            var lane = LaneLock(upload);
+            Task<Task<FileVersion>> step;
+            lock (entering)
+            {
+                entering.TryGetValue(lane, out var previous);
+                step = Enter(previous, upload, coalesce);
+                entering[lane] = step;
+            }
+            Task<FileVersion>? sent = null;
+            try
+            {
+                sent = await step;
+                return await sent;
+            }
+            finally
+            {
+                if (coalesce && sent != null) lock (settingsGate) settingsWrites.Remove(sent);
+                lock (entering)
+                {
+                    if (entering.TryGetValue(lane, out var last) && last == step) entering.Remove(lane);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Stores `upload` once the lane's earlier saves are stored, then starts it: the saves of a lane join it in
+        /// the order they were made, so a large save stored after a smaller, newer one still counts as the older.
+        /// </summary>
+        async Task<Task<FileVersion>> Enter(Task? previous, PendingUpload upload, bool coalesce)
+        {
+            if (previous != null)
+            {
+                try { await previous; }
+                catch (Exception) { /* that save's caller heard of it */ }
+            }
             await Json.Put(store, UploadKey(upload.UploadId), upload);
-            if (!coalesce) return await Pump(upload, (_, __, ___) => { });
+            if (!coalesce) return Pump(upload, (_, __, ___) => { });
             var write = WriteSettingsAsync(upload);
             lock (settingsGate) settingsWrites.Add(write);
-            try { return await write; }
-            finally { lock (settingsGate) settingsWrites.Remove(write); }
+            return write;
         }
 
         /// <summary>Waits for the lane's turn (30 s after its last write, or until a flush), then sends; a newer save of the lane replaces this one meanwhile.</summary>
@@ -299,6 +335,13 @@ namespace Krtuworks.Internal
         /// <summary>The app pauses or ends: the settings writes that wait for their turn go now, and are waited for.</summary>
         internal async Task FlushSettingsAsync()
         {
+            Task[] stored;
+            lock (entering) stored = entering.Values.ToArray();
+            foreach (var step in stored)
+            {
+                try { await step; }
+                catch (Exception) { /* the caller of that save heard of it */ }
+            }
             Task[] running;
             CancellationTokenSource released;
             lock (settingsGate)
