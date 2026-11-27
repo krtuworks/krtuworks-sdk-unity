@@ -41,6 +41,36 @@ namespace Krtuworks
         [JsonProperty("ramMb")] public int? RamMb;
         [JsonProperty("screenWidth")] public int? ScreenWidth;
         [JsonProperty("screenHeight")] public int? ScreenHeight;
+
+        /// <summary>The device as the server takes it: text trimmed and cut to its limits (os 40, osVersion 40, model 80, gpu 120), empty parts and numbers out of range left out.</summary>
+        internal DeviceInfo Cleaned() => new DeviceInfo
+        {
+            Os = CleanText(Os, 40),
+            OsVersion = CleanText(OsVersion, 40),
+            Model = CleanText(Model, 80),
+            Gpu = CleanText(Gpu, 120),
+            RamMb = CleanNumber(RamMb, 10_000_000),
+            ScreenWidth = CleanNumber(ScreenWidth, 100_000),
+            ScreenHeight = CleanNumber(ScreenHeight, 100_000),
+        };
+
+        /// <summary>The language tag as the server takes it: trimmed, at most 35 characters, nothing when empty.</summary>
+        internal static string? CleanLocale(string? locale) => CleanText(locale, 35);
+
+        static string? CleanText(string? text, int max)
+        {
+            var trimmed = text?.Trim();
+            if (string.IsNullOrEmpty(trimmed)) return null;
+            if (trimmed!.Length > max)
+            {
+                // Never cut a surrogate pair in half.
+                var end = char.IsHighSurrogate(trimmed[max - 1]) ? max - 1 : max;
+                trimmed = trimmed.Substring(0, end).Trim();
+            }
+            return trimmed.Length == 0 ? null : trimmed;
+        }
+
+        static int? CleanNumber(int? value, int max) => value.HasValue && value.Value >= 1 && value.Value <= max ? value : null;
     }
 
     public sealed class KrtuworksOptions
@@ -240,8 +270,8 @@ namespace Krtuworks.Internal
                 IdOrigin = idOrigin,
                 DevOrigin = o.DevOrigin.TrimEnd('/'),
                 Issuer = $"{idOrigin}/oidc",
-                Device = o.Device,
-                Locale = o.Locale,
+                Device = o.Device?.Cleaned(),
+                Locale = DeviceInfo.CleanLocale(o.Locale),
                 Sessions = o.Sessions,
                 PositionSampleSeconds = PositionSampler.Interval(o.PositionSampleSeconds),
                 FirstLaunchOnline = string.Equals(o.Config.FirstLaunch, "online", StringComparison.OrdinalIgnoreCase),

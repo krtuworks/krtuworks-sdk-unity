@@ -279,7 +279,7 @@ namespace Krtuworks.Unity
         {
             Os = OsName(),
             OsVersion = Clip(SystemInfo.operatingSystem, 40),
-            Model = Clip(SystemInfo.deviceModel, 120),
+            Model = Clip(SystemInfo.deviceModel, 80),
             Gpu = Clip(SystemInfo.graphicsDeviceName, 120),
             RamMb = SystemInfo.systemMemorySize > 0 ? SystemInfo.systemMemorySize : (int?)null,
             ScreenWidth = Screen.currentResolution.width > 0 ? Screen.currentResolution.width : (int?)null,

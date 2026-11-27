@@ -254,6 +254,72 @@ namespace Krtuworks.Tests
             await krtu.ShutdownAsync();
         }
 
+        [Test]
+        public async Task TheNextPlayerOnSteamIsLinedUpToo_ControlThePlayerBeforeWasLinedUpOnce()
+        {
+            var server = new FakeServer();
+            server.GuestRoutes();
+            server.ConfigRoute(new JObject());
+            server.AcceptEvents(new List<JObject>());
+            server.ApplyProgress();
+            var subjects = new Queue<string>(new[] { "pw_steam_aaaaaaaaaaaa", "pw_steam_bbbbbbbbbbbb" });
+            server.On("POST", "/oidc/token", _ => FakeServer.Ok(FakeServer.TokenAnswer(subjects.Dequeue())));
+            var sessions = 0;
+            server.On("POST", "/v1/sessions", _ => new Reply { Status = 201, Json = new JObject { ["session"] = new JObject { ["id"] = $"ses_{(++sessions).ToString().PadLeft(20, 'c')}", ["startedAt"] = Clock.IsoNow() }, ["platformLink"] = SteamLink("ACTIVE") } });
+            server.On("POST", "/v1/me/progress/platform-sync", _ => FakeServer.Ok(new JObject { ["unlockedHere"] = new JArray(), ["toPlatform"] = new JArray(), ["toClear"] = new JArray() }));
+            server.On("GET", "/v1/me/progress", _ => FakeServer.Ok(new JObject { ["stats"] = new JArray(), ["achievements"] = new JArray() }));
+            var krtu = await KrtuworksClient.InitializeAsync(server.Options(extra: o =>
+            {
+                o.Platform = "STEAM";
+                o.Sessions = true;
+                o.PlatformServices = new FakeSteam();
+            }));
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            await krtu.ReadyAsync();
+            Assert.That(server.Count("POST", "/v1/me/progress/platform-sync"), Is.EqualTo(1), "the first player is lined up once");
+            await krtu.SignOutAsync();
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            await krtu.ReadyAsync();
+            Assert.That(server.Count("POST", "/v1/me/progress/platform-sync"), Is.EqualTo(2), "the next player's achievements are lined up as well");
+            await krtu.ShutdownAsync();
+        }
+
+        [Test]
+        public void ADeviceIsCutToWhatTheServerTakes_ControlOneThatFitsIsKept()
+        {
+            var fits = new DeviceInfo { Os = "Windows", OsVersion = "11", Model = "Desktop", Gpu = "RTX", RamMb = 16384, ScreenWidth = 1920, ScreenHeight = 1080 };
+            var same = fits.Cleaned();
+            Assert.That((same.Os, same.OsVersion, same.Model, same.Gpu, same.RamMb, same.ScreenWidth, same.ScreenHeight), Is.EqualTo(("Windows", "11", "Desktop", "RTX", (int?)16384, (int?)1920, (int?)1080)));
+            var cut = new DeviceInfo { Os = " " + new string('o', 60), OsVersion = "  ", Model = new string('m', 200), Gpu = new string('g', 130), RamMb = 0, ScreenWidth = 200_000, ScreenHeight = 1080 }.Cleaned();
+            Assert.That(cut.Os, Is.EqualTo(new string('o', 40)));
+            Assert.That(cut.OsVersion, Is.Null);
+            Assert.That(cut.Model, Is.EqualTo(new string('m', 80)), "the server takes 80");
+            Assert.That(cut.Gpu, Is.EqualTo(new string('g', 120)));
+            Assert.That((cut.RamMb, cut.ScreenWidth, cut.ScreenHeight), Is.EqualTo(((int?)null, (int?)null, (int?)1080)));
+            Assert.That(new DeviceInfo { Model = new string('x', 79) + "\uD83C\uDFAE" }.Cleaned().Model, Is.EqualTo(new string('x', 79)), "a surrogate pair is never cut in half");
+            Assert.That(DeviceInfo.CleanLocale(new string('l', 50)), Is.EqualTo(new string('l', 35)));
+        }
+
+        [Test]
+        public async Task AStatSteamRefusedIsAskedAboutAgainAfterAWhile_NotOnEveryWriteInBetween()
+        {
+            long now = 0;
+            var steam = new FakeSteamStats();
+            steam.Unpublished.Add("STAT_SECRET");
+            var mirror = new StatMirror(steam, () => now);
+            var secret = new StatPlatformId { Id = "STAT_SECRET", Type = "INT" };
+            await mirror.SetAsync(secret, 1);
+            now = StatMirror.RefusedForMs - 1;
+            await mirror.SetAsync(secret, 2);
+            Assert.That(steam.SetCalls.Count, Is.EqualTo(1), "inside the wait nothing is asked");
+            steam.Unpublished.Clear();
+            now = StatMirror.RefusedForMs;
+            await mirror.SetAsync(secret, 3);
+            Assert.That(steam.SetCalls.Select(c => c.Value), Is.EqualTo(new[] { 1.0, 3.0 }), "after the wait it is tried again and Steam takes it now");
+            await mirror.SetAsync(secret, 4);
+            Assert.That(steam.SetCalls.Count, Is.EqualTo(3), "control: a stat Steam took is never held back");
+        }
+
         static JObject SteamLink(string state) => new JObject { ["platform"] = "STEAM", ["platformAccountId"] = "76561198000000302", ["state"] = state };
 
         [Test]
@@ -410,7 +476,7 @@ namespace Krtuworks.Tests
             await krtu.FlushAsync();
             await krtu.IncrementStatAsync("secret", 1);
             await krtu.FlushAsync();
-            Assert.That(steam.SetCalls.Count(c => c.Id == "STAT_SECRET"), Is.EqualTo(1), "a stat Steam refused is left alone for the session");
+            Assert.That(steam.SetCalls.Count(c => c.Id == "STAT_SECRET"), Is.EqualTo(1), "a stat Steam refused is left alone for a while (the next write inside it asks nothing)");
             await krtu.ShutdownAsync();
             Assert.That(steam.Stores, Is.EqualTo(3), "the exit stores what was set");
         }

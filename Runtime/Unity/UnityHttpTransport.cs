@@ -8,7 +8,7 @@ namespace Krtuworks.Unity
 {
     /// <summary>
     /// The SDK's HTTP through UnityWebRequest (every platform, WebGL included). Runs on the main thread: the
-    /// SDK's awaits come back to Unity's synchronization context. No answer at all is `network_error`; an
+    /// SDK's awaits come back to Unity's synchronization context. No answer at all, or one cut short in its body, is `network_error`; an
     /// HTTP error status is an answer like any other.
     /// </summary>
     public sealed class UnityHttpTransport : IHttpTransport
@@ -36,7 +36,8 @@ namespace Krtuworks.Unity
             {
                 try
                 {
-                    if (request.result == UnityWebRequest.Result.ConnectionError || request.responseCode == 0)
+                    // A status with a body cut short (DataProcessingError) is no answer: the caller would read half a body as the server's word.
+                    if (request.result == UnityWebRequest.Result.ConnectionError || request.result == UnityWebRequest.Result.DataProcessingError || request.responseCode == 0)
                     {
                         done.SetException(new KrtuworksException("network_error", $"No answer from {new Uri(call.Url).Host}: {request.error}"));
                         return;

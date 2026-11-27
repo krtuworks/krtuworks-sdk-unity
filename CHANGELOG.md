@@ -4,6 +4,14 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.17 - 2026-11-27
+
+### Fixed
+- The device model is cut to 80 characters, the most the server takes (it was 120): a longer model made every session open and every bug report be refused as a bad request. The core now also trims and cuts every device part and the language tag to the server's limits whatever the game passes in.
+- The next player on Steam has their achievements lined up with Steam as well. Before, the lining up ran once per launch, so a second player signing in during the same launch was not synced.
+- A stat Steam refuses is asked about again after 5 minutes (a stat published on Steam since then is mirrored from then on). Before, it was left alone until the game restarted.
+- A response whose body was cut short (`UnityWebRequest` `DataProcessingError`) is a `network_error`, like a lost connection, instead of being read as the server's answer.
+
 ## 1.0.16 - 2026-11-27
 
 ### Fixed

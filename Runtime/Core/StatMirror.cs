@@ -18,15 +18,16 @@ namespace Krtuworks.Internal
     /// The stats mirror on the platform (Steam sync, stats; owner decision D-S5 2026-11-06). The server is the
     /// record: the platform is set to the server's value as soon as the server has it (never an increase, so
     /// nothing counts twice), and the platform's servers get the values at most every 2 minutes, on pause and on
-    /// exit. A stat the platform refuses (not published there, another type) is left alone for the session.
+    /// exit. A stat the platform refuses (not published there, another type) is left alone for 5 minutes, then tried again (a stat published since is then mirrored); the rounds in between do not ask the platform again.
     /// </summary>
     internal sealed class StatMirror
     {
         internal const long StoreEveryMs = 120_000;
+        internal const long RefusedForMs = 300_000;
 
         readonly IPlatformStats platform;
         readonly Func<long> nowMs;
-        readonly HashSet<string> refused = new HashSet<string>();
+        readonly Dictionary<string, long> refused = new Dictionary<string, long>();
         bool dirty;
         long lastStoreAt = long.MinValue;
 
@@ -40,14 +41,23 @@ namespace Krtuworks.Internal
         internal static double PlatformValue(string type, double value) =>
             type == "INT" ? Math.Max(int.MinValue, Math.Min(int.MaxValue, Math.Truncate(value))) : (float)value;
 
-        internal Task<double?> ReadAsync(StatPlatformId stat) => refused.Contains(stat.Id) ? Task.FromResult<double?>(null) : platform.GetStatAsync(stat.Id, stat.Type);
+        /// <summary>Whether the platform refused the stat less than 5 minutes ago; an older refusal is forgotten.</summary>
+        bool IsRefused(string id)
+        {
+            if (!refused.TryGetValue(id, out var at)) return false;
+            if (nowMs() - at < RefusedForMs) return true;
+            refused.Remove(id);
+            return false;
+        }
+
+        internal Task<double?> ReadAsync(StatPlatformId stat) => IsRefused(stat.Id) ? Task.FromResult<double?>(null) : platform.GetStatAsync(stat.Id, stat.Type);
 
         /// <summary>Sets the platform's stat to the server's value.</summary>
         internal async Task SetAsync(StatPlatformId stat, double serverValue)
         {
-            if (refused.Contains(stat.Id)) return;
+            if (IsRefused(stat.Id)) return;
             if (await platform.SetStatAsync(stat.Id, stat.Type, PlatformValue(stat.Type, serverValue))) dirty = true;
-            else refused.Add(stat.Id);
+            else refused[stat.Id] = nowMs();
         }
 
         /// <summary>Sends what was set to the platform's servers when 2 minutes passed since the last time, or now (`force`: pause, exit, the launch's sync).</summary>

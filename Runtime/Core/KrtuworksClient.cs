@@ -382,6 +382,7 @@ namespace Krtuworks
             positions.Reset();
             experiments = new Dictionary<string, JToken?>();
             optedOut = false;
+            platformSynced = false;
         }
 
         /// <summary>The player's account is gone: what waited on this device for it can never be taken.</summary>
@@ -431,7 +432,7 @@ namespace Krtuworks
         }
 
         /// <summary>
-        /// The session's platform account: mirrored, the achievements line up once per launch; waiting for the
+        /// The session's platform account: mirrored, the achievements line up once per player and launch; waiting for the
         /// player's answer, a third account or another Krtuworks ID's, the game is told. None of those, a refused
         /// one or none proved mirrors nothing, so nothing is sent.
         /// </summary>
