@@ -195,5 +195,44 @@ namespace Krtuworks.Tests
             Assert.That(app.Server.Count("GET", "/v1/me/entitlements"), Is.EqualTo(0));
             await notGame.ShutdownAsync();
         }
+    
+        /// <summary>A store whose read of one key waits until it is let go.</summary>
+        sealed class GatedStore : IKrtuStore
+        {
+            readonly MemoryStore inner = new MemoryStore();
+            internal readonly TaskCompletionSource<bool> Gate = new TaskCompletionSource<bool>();
+            internal string GatedSuffix = "";
+
+            public async Task<string?> GetAsync(string key)
+            {
+                if (GatedSuffix != "" && key.EndsWith(GatedSuffix)) await Gate.Task;
+                return await inner.GetAsync(key);
+            }
+
+            public Task SetAsync(string key, string value) => inner.SetAsync(key, value);
+            public Task DeleteAsync(string key) => inner.DeleteAsync(key);
+            public Task<IReadOnlyList<string>> KeysAsync(string prefix) => inner.KeysAsync(prefix);
+        }
+
+        [Test]
+        public async Task OnePlayersSessionAnswerNeverLandsInTheNextPlayersLicences()
+        {
+            var opts = Resolved.From(new FakeServer().Options());
+            var store = new GatedStore { GatedSuffix = ":pw_a" };
+            var who = "pw_a";
+            var keeper = new EntitlementKeeper(opts, null, null!, store, () => who);
+            var forA = keeper.FromSessionAsync(new JArray { Item("expansion", "ACTIVE", true, null) });
+            who = "pw_b";
+            await keeper.EnsureLoadedAsync();
+            store.Gate.SetResult(true);
+            await forA;
+            Assert.That(keeper.OwnsDlc("expansion"), Is.False, "A's confirmed DLC is not B's");
+            Assert.That(keeper.List(), Is.Empty);
+            Assert.That(await store.GetAsync("krtu:" + opts.ClientId + ":entitlements:pw_b"), Is.Null, "nothing of A's answer is kept as B's");
+
+            // Control: B's own session answer is taken.
+            await keeper.FromSessionAsync(new JArray { Item("expansion", "ACTIVE", true, null) });
+            Assert.That(keeper.OwnsDlc("expansion"), Is.True);
+        }
     }
 }

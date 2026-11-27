@@ -128,7 +128,7 @@ namespace Krtuworks.Internal
             var items = ItemsOf(token);
             if (who == null || items.Count == 0) return;
             await EnsureLoadedAsync();
-            if (!Held) return;
+            if (!Held || owner != who) return;
             confirmed = items.Where(i => i.Checked).GroupBy(i => i.Sku).ToDictionary(g => g.Key, g => g.Last());
             await KeepAsync(who, items.Select(i => new StoredEntitlement { Sku = i.Sku, Source = i.Source, Status = i.Status, PlatformProductId = i.PlatformProductId }).ToList());
         }
@@ -139,8 +139,8 @@ namespace Krtuworks.Internal
             var who = subject();
             if (who == null) return new List<Entitlement>();
             await EnsureLoadedAsync();
-            var answer = await api.PlayerAsync("/v1/me/entitlements", new PlayerCall());
-            if (!Held) return new List<Entitlement>();
+            var answer = await api.PlayerAsync("/v1/me/entitlements", new PlayerCall { Owner = who });
+            if (!Held || owner != who) return new List<Entitlement>();
             var items = ItemsOf(answer.Json?["entitlements"]);
             var listed = new HashSet<string>(items.Select(i => i.Sku));
             var next = items.Select(i => new StoredEntitlement { Sku = i.Sku, Source = i.Source, Status = i.Status, PlatformProductId = i.PlatformProductId }).ToList();

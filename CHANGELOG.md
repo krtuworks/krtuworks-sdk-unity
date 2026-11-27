@@ -4,6 +4,11 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.16 - 2026-11-27
+
+### Fixed
+- A licence the server confirmed for one player no longer lands in the next player's licences when the player changes while the kept list is still being read, and a licence refresh answered after the player changed is dropped. `ownsDlc` could answer true for a DLC the new player does not own.
+
 ## 1.0.15 - 2026-11-27
 
 ### Fixed
