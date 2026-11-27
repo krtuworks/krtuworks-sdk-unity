@@ -943,10 +943,11 @@ namespace Krtuworks
         async Task ApplySessionsSwitchAsync()
         {
             if (!options.Sessions || stopping.IsCancellationRequested) return;
-            var on = config.ModuleOn("sessions");
+            var on = sessions.Wanted();
             // A failed open is asked again by the tick once its wait is over.
             if (on && identity.Player != null && sessions.Session == null && !sessions.OpenFailed) await Quietly(sessions.OpenAsync());
-            else if (!on && sessions.Session != null) await sessions.EndAsync();
+            // Off ends the session, and also an open still on its way and a retry waiting: nothing opens or beats after it.
+            else if (!on) await sessions.EndAsync();
         }
 
         /// <summary>The owner's gates for this build: maintenance, a newer minimum version, a switch.</summary>

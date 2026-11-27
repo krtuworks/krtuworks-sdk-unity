@@ -959,5 +959,65 @@ namespace Krtuworks.Tests
             Assert.That(server.Count("POST", "/v1/sessions"), Is.EqualTo(2), "on again: a new session");
             await krtu.ShutdownAsync();
         }
+
+        [TestCase("module")]
+        [TestCase("build")]
+        public async Task ASwitchOffWhileAnOpenIsOnItsWay_TheLateAnswerEndsTheServerSessionAndNothingBeats_ControlLeftOnTheSessionOpensAndBeats(string how)
+        {
+            foreach (var off in new[] { true, false })
+            {
+                var server = new FakeServer();
+                server.GuestRoutes();
+                var config = new JObject { ["modules"] = new JObject { ["sessions"] = false } };
+                var switches = new JArray();
+                var bump = server.ConfigRoute(config, switches);
+                server.AcceptEvents(new List<JObject>());
+                var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                server.OnAsync("POST", "/v1/sessions", async _ =>
+                {
+                    await gate.Task;
+                    return new Reply
+                    {
+                        Status = 201,
+                        Json = new JObject { ["session"] = new JObject { ["id"] = "ses_" + new string('l', 20), ["startedAt"] = Clock.IsoNow() }, ["heartbeatSeconds"] = 1, ["serverTime"] = Clock.IsoNow() },
+                    };
+                });
+                server.OnPrefix("POST", "/v1/sessions/", _ => FakeServer.Ok(new JObject { ["nextHeartbeatSeconds"] = 1 }));
+                var krtu = await KrtuworksClient.InitializeAsync(server.Options(extra: o => o.Sessions = true));
+                await krtu.RefreshConfigAsync();
+                await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+                await krtu.ReadyAsync();
+                config["modules"]!["sessions"] = true;
+                bump();
+                var opening = krtu.RefreshConfigAsync();
+                await Until(() => server.Count("POST", "/v1/sessions") == 1, "the open is on its way", 500);
+
+                if (off)
+                {
+                    if (how == "module") config["modules"]!["sessions"] = false;
+                    else switches.Add(new JObject { ["build"] = "*", ["mode"] = "ALL" });
+                    bump();
+                    await krtu.RefreshConfigAsync();
+                }
+                gate.SetResult(true);
+                await opening;
+                await Task.Delay(1800);
+                int Ends() => server.Calls.Count(c => c.Path.EndsWith("/end"));
+                int Beats() => server.Calls.Count(c => c.Path.EndsWith("/heartbeat"));
+                if (off)
+                {
+                    Assert.That(Ends(), Is.EqualTo(1), "the late session is ended on the server");
+                    Assert.That(server.Calls.Single(c => c.Path.EndsWith("/end")).Path, Does.Contain("ses_" + new string('l', 20)), "the end names the late session");
+                    Assert.That(Beats(), Is.Zero, "no heartbeat");
+                    Assert.That(server.Count("POST", "/v1/sessions"), Is.EqualTo(1), "no open is tried again");
+                }
+                else
+                {
+                    Assert.That(Ends(), Is.Zero, "control: left on, nothing is ended");
+                    await Until(() => Beats() > 0, "control: left on, the session beats");
+                }
+                await krtu.ShutdownAsync();
+            }
+        }
     }
 }

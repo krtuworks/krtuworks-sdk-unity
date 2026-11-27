@@ -119,6 +119,7 @@ namespace Krtuworks.Internal
         /// <summary>
         /// Opens the player's session if there is none (one at a time). An open still running for another player, or one
         /// that a <see cref="Close"/> overtook, is waited out and this player's own follows: it must not hand back that one's nothing.
+        /// The follow-up opens only while a session is still wanted: a switch-off that overtook the open ends the wish.
         /// </summary>
         internal async Task<SessionInfo?> OpenAsync()
         {
@@ -128,7 +129,7 @@ namespace Krtuworks.Internal
             SessionInfo? result;
             try { result = await opening.Run(OpenOnce); }
             catch (Exception) when (asked != null && Overtaken(asked) && subject() == asked) { result = null; }
-            if (result == null && asked != null && subject() == asked && Overtaken(asked)) return await opening.Run(OpenOnce);
+            if (result == null && asked != null && subject() == asked && Overtaken(asked) && Wanted()) return await opening.Run(OpenOnce);
             return result;
         }
 
@@ -150,6 +151,8 @@ namespace Krtuworks.Internal
             }
             catch (Exception err)
             {
+                // A close since this open began ended the wish for a session: no retry waits for it.
+                if (openedIn != generation) throw;
                 var wait = err is KrtuworksException known ? Retry.DelayMs(known, ref openBackoffMs) : (openBackoffMs = Math.Min(300_000, Math.Max(5_000, openBackoffMs * 2)));
                 openRetryAt = clock.ElapsedMilliseconds + wait;
                 throw;
