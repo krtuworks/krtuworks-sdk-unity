@@ -151,6 +151,9 @@ namespace Krtuworks.Internal
             }
         }
 
+        /// <summary>The last open failed: the client's tick asks again once its wait is over.</summary>
+        internal bool OpenFailed => openRetryAt.HasValue;
+
         /// <summary>Lets a failed open be tried again at the next tick (back online).</summary>
         internal void RetryOpenSoon()
         {

@@ -860,5 +860,57 @@ namespace Krtuworks.Tests
             Assert.That(quiet.Shown.Select(s => s.Kind), Is.EqualTo(new[] { UiScreenKind.Age }), "control: no connect screen without the option");
             await plain.ShutdownAsync();
         }
+
+        [Test]
+        public async Task TheSessionsSwitchTakesEffectOnTheNextConfigRead_OnOpensASessionOffEndsItAndItsHeartbeats_ControlOnAgainOpensANewOne()
+        {
+            var server = new FakeServer();
+            server.GuestRoutes();
+            var config = new JObject { ["modules"] = new JObject { ["sessions"] = false } };
+            var bump = server.ConfigRoute(config);
+            server.AcceptEvents(new List<JObject>());
+            var ids = 0;
+            server.On("POST", "/v1/sessions", _ =>
+            {
+                ids++;
+                return new Reply
+                {
+                    Status = 201,
+                    Json = new JObject { ["session"] = new JObject { ["id"] = $"ses_{new string((char)('a' + ids), 20)}", ["startedAt"] = Clock.IsoNow() }, ["heartbeatSeconds"] = 1, ["serverTime"] = Clock.IsoNow() },
+                };
+            });
+            server.OnPrefix("POST", "/v1/sessions/", _ => FakeServer.Ok(new JObject { ["nextHeartbeatSeconds"] = 1 }));
+            var krtu = await KrtuworksClient.InitializeAsync(server.Options(extra: o => o.Sessions = true));
+            await krtu.RefreshConfigAsync();
+            await krtu.SignInAsGuestAsync("2000-01-01", Terms);
+            await krtu.ReadyAsync();
+            await krtu.FlushAsync();
+            Assert.That(server.Count("POST", "/v1/sessions"), Is.Zero, "off at the start: no session");
+
+            async Task Flip(bool on)
+            {
+                config["modules"]!["sessions"] = on;
+                bump();
+                await krtu.RefreshConfigAsync();
+            }
+            int Ends() => server.Calls.Count(c => c.Path.EndsWith("/end"));
+            int Beats() => server.Calls.Count(c => c.Path.EndsWith("/heartbeat"));
+
+            await Flip(true);
+            Assert.That(server.Count("POST", "/v1/sessions"), Is.EqualTo(1), "switched on: the session opens");
+            await Until(() => Beats() > 0, "the open session sends heartbeats", 500);
+
+            await Flip(false);
+            Assert.That(Ends(), Is.EqualTo(1), "switched off: the session ends");
+            var before = Beats();
+            await krtu.FlushAsync();
+            await Task.Delay(1500);
+            Assert.That(Beats(), Is.EqualTo(before), "no heartbeat for an ended session");
+            Assert.That(server.Count("POST", "/v1/sessions"), Is.EqualTo(1), "a flush does not open one while off");
+
+            await Flip(true);
+            Assert.That(server.Count("POST", "/v1/sessions"), Is.EqualTo(2), "on again: a new session");
+            await krtu.ShutdownAsync();
+        }
     }
 }
