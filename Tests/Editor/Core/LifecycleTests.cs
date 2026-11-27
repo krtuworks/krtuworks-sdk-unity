@@ -397,6 +397,53 @@ namespace Krtuworks.Tests
             Assert.That(keeper.Session?.Owner, Is.EqualTo(B));
         }
 
+        [Test]
+        public async Task ACloseWhileAnOpenIsInFlight_TheNextOpenIsFreshAndTheLateSessionIsEnded_ControlWithoutACloseTheyShareTheOpen()
+        {
+            foreach (var closed in new[] { false, true })
+            {
+                var server = new FakeServer();
+                server.GuestRoutes(A);
+                var gate = new TaskCompletionSource<bool>();
+                var opens = 0;
+                SessionRoutes(server, async _ =>
+                {
+                    var n = Interlocked.Increment(ref opens);
+                    if (n == 1) await gate.Task;
+                    return FakeServer.Ok(new JObject
+                    {
+                        ["session"] = new JObject { ["id"] = $"ses_{new string((char)('a' + n), 20)}", ["startedAt"] = "2026-11-25T10:00:00.000Z" },
+                        ["heartbeatSeconds"] = 60,
+                    });
+                });
+                var shared = new MemoryStore();
+                var opts = Resolved.From(server.Options(shared, extra: o => o.Sessions = true));
+                var clock = new Clock();
+                var identity = new Identity(opts, shared, shared, server, clock, null);
+                await identity.SignInAsGuestAsync("2000-01-01", Terms, false);
+                var keeper = new SessionKeeper(opts, new Api(opts, identity, server, clock), () => identity.Player?.Subject, null);
+                var first = keeper.OpenAsync();
+                await Until(() => Volatile.Read(ref opens) == 1, "the first open is on its way");
+                if (closed) keeper.Close();
+                var second = keeper.OpenAsync();
+                gate.SetResult(true);
+                await first;
+                var got = await second;
+                if (closed)
+                {
+                    Assert.That(got?.Id, Is.EqualTo($"ses_{new string('c', 20)}"), "a fresh open after the close");
+                    Assert.That(opens, Is.EqualTo(2));
+                    await Until(() => server.Calls.Any(c => c.Path == $"/v1/sessions/ses_{new string('b', 20)}/end"), "the late session is ended on the server");
+                }
+                else
+                {
+                    Assert.That(got?.Id, Is.EqualTo($"ses_{new string('b', 20)}"));
+                    Assert.That(opens, Is.EqualTo(1));
+                }
+                Assert.That(keeper.Session?.Id, Is.EqualTo(got?.Id));
+            }
+        }
+
         // ── The pace of settings writes and a rate limit ──────────────────────
 
         sealed class Waits

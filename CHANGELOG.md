@@ -4,6 +4,13 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.14 - 2026-11-27
+
+### Fixed
+- A session whose open was still on its way when the player left or the SDK closed it no longer blocks the next one: opening again after the close starts a fresh session instead of returning the answer of the closed one.
+- A refresh the server refused because the app is frozen (`app_suspended`) keeps queued items and waits 15 minutes, as for the other refusals that can lift. Before, it was retried on the short growing backoff.
+- Events refused because the app does not ship on the platform yet (`platform_not_registered`) are kept and sent again after the 15 minute wait, so they arrive once the platform is added. Before, the whole batch (up to 500 events) was dropped. The on-device limits (50 000 events, 20 MiB, 30 days) still apply.
+
 ## 1.0.13 - 2026-11-27
 
 ### Fixed

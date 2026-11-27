@@ -67,6 +67,8 @@ namespace Krtuworks.Internal
         internal Func<bool> Wanted = () => true;
         /// <summary>The player the latest open ran for.</summary>
         string? openedFor;
+        /// <summary>The <see cref="generation"/> the latest open began in.</summary>
+        int openedIn;
         /// <summary>When a failed open is tried again (null: none failed).</summary>
         long? openRetryAt;
         long openBackoffMs;
@@ -115,8 +117,8 @@ namespace Krtuworks.Internal
         }
 
         /// <summary>
-        /// Opens the player's session if there is none (one at a time). An open still running for another player is
-        /// waited out and this player's own follows: it must not hand back that one's nothing.
+        /// Opens the player's session if there is none (one at a time). An open still running for another player, or one
+        /// that a <see cref="Close"/> overtook, is waited out and this player's own follows: it must not hand back that one's nothing.
         /// </summary>
         internal async Task<SessionInfo?> OpenAsync()
         {
@@ -125,10 +127,13 @@ namespace Krtuworks.Internal
             if (session != null) return session;
             SessionInfo? result;
             try { result = await opening.Run(OpenOnce); }
-            catch (Exception) when (asked != null && openedFor != asked && subject() == asked) { result = null; }
-            if (result == null && asked != null && subject() == asked && openedFor != asked) return await opening.Run(OpenOnce);
+            catch (Exception) when (asked != null && Overtaken(asked) && subject() == asked) { result = null; }
+            if (result == null && asked != null && subject() == asked && Overtaken(asked)) return await opening.Run(OpenOnce);
             return result;
         }
+
+        /// <summary>The open that ran last was for another player or began before a close: its answer is not for `asked`.</summary>
+        bool Overtaken(string asked) => openedFor != asked || openedIn != generation;
 
         /// <summary>A failed open is tried again by the client's tick, with a growing wait (a server's own wait when it gave one).</summary>
         async Task<SessionInfo?> OpenOnce()
@@ -168,6 +173,7 @@ namespace Krtuworks.Internal
             if (owner == null) return null;
             if (current != null && current.Owner != owner) Close();
             var openedIn = generation;
+            this.openedIn = openedIn;
             if (clientSessionId == null)
             {
                 // A new session (not an open sent again after a lost answer): its time in use starts now.

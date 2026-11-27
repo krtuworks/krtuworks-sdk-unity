@@ -79,6 +79,8 @@ namespace Krtuworks.Internal
     internal sealed class EventQueue
     {
         internal const string Anon = "anon";
+        /// <summary>The server's refusal while the app does not ship on this platform yet: the events wait for the platform to be added.</summary>
+        const string PlatformNotRegistered = "platform_not_registered";
         const int MaxEvents = 50_000;
         const int MaxBytes = 20 * 1024 * 1024;
         static readonly TimeSpan MaxAge = TimeSpan.FromDays(30);
@@ -446,7 +448,8 @@ namespace Krtuworks.Internal
                 await Unfreeze(owner, batch);
                 return "done";
             }
-            if ((err.Status == 400 || err.Status == 413) && !err.KeepsQueued)
+            var notShippedYet = err.Code == PlatformNotRegistered;
+            if ((err.Status == 400 || err.Status == 413) && !err.KeepsQueued && !notShippedYet)
             {
                 // The batch itself can never be taken: drop it rather than block every later event.
                 using (await Locks.Take(Key(owner)))
@@ -461,8 +464,9 @@ namespace Krtuworks.Internal
                 }
                 return err.Code;
             }
-            // A refusal that can lift (a frozen app, a merge, a module off) and a failure of the token keep the batch, with a long wait.
-            notBefore = NowMs + Retry.DelayMs(err, ref backoffMs);
+            // A refusal that can lift (a frozen app, a merge, a module off), a failure of the token and an app that does not
+            // ship on this platform yet keep the batch, with a long wait.
+            notBefore = NowMs + Retry.DelayMs(err, ref backoffMs, notShippedYet);
             return err.Code;
         }
 

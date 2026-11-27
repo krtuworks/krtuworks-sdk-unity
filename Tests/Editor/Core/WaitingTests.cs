@@ -105,6 +105,36 @@ namespace Krtuworks.Tests
         }
 
         [Test]
+        public async Task ABatchRefusedWithPlatformNotRegisteredStaysAndWaitsALongTime_ThenGoesOnceThePlatformIsAdded_ControlAnother400DropsIt()
+        {
+            foreach (var code in new[] { "platform_not_registered", "invalid_request" })
+            {
+                var server = new FakeServer();
+                var krtu = await Start(server);
+                krtu.Track("screen_view", new { screen = "a" });
+                server.On("POST", "/v1/events", _ => Error(400, code));
+                var first = await krtu.FlushAsync();
+                Assert.That(first.Events.StoppedBy, Is.EqualTo(code));
+                if (code == "invalid_request")
+                {
+                    Assert.That((await krtu.WaitingAsync()).Events, Is.EqualTo(0), "a refusal of the batch itself drops it");
+                    await krtu.ShutdownAsync();
+                    continue;
+                }
+                Assert.That((await krtu.WaitingAsync()).Events, Is.EqualTo(1), "the frozen batch stays");
+                Assert.That((await krtu.FlushAsync()).Events.StoppedBy, Is.EqualTo("waiting"), "the long wait, not hammering the server");
+                Assert.That(server.Count("POST", "/v1/events"), Is.EqualTo(1));
+                var accepted = new List<JObject>();
+                server.AcceptEvents(accepted);
+                krtu.Online();
+                var sent = await krtu.FlushAsync();
+                Assert.That(sent.Events.Sent, Is.EqualTo(1), "the same events arrive once the platform is added");
+                Assert.That((await krtu.WaitingAsync()).Events, Is.EqualTo(0));
+                await krtu.ShutdownAsync();
+            }
+        }
+
+        [Test]
         public async Task ABugReportStaysWhenTheTokenFails_ControlAnEndpointRefusingTheReportDropsIt()
         {
             var server = new FakeServer();

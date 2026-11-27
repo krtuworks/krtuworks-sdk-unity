@@ -40,8 +40,11 @@ namespace Krtuworks
             "app_suspended", "account_merged", "account_merging", "sanctioned", "account_deletion_pending", "switched_off", "module_disabled",
         };
 
-        /// <summary>True when the refusal can lift (<see cref="WaitingCodes"/>): the queued item stays.</summary>
-        internal bool Waiting => WaitingCodes.Contains(Code);
+        /// <summary>
+        /// True when the refusal can lift (<see cref="WaitingCodes"/>; a refresh the server refused for a frozen app
+        /// names `app_suspended` in its description): the queued item stays.
+        /// </summary>
+        internal bool Waiting => WaitingCodes.Contains(Code) || (AuthLayer && ((string?)Details["description"])?.Contains("app_suspended") == true);
 
         /// <summary>
         /// Raised while the player's credentials were got or refreshed, before the endpoint answered: a refusal of the
@@ -62,11 +65,11 @@ namespace Krtuworks
         /// The wait before the next try: the server's `Retry-After` when it gave one, else a long wait for a refusal that can
         /// lift, else the queue's own growing backoff (5 s, doubling, at most 5 min; <paramref name="backoffMs"/> keeps it).
         /// </summary>
-        internal static long DelayMs(KrtuworksException err, ref long backoffMs)
+        internal static long DelayMs(KrtuworksException err, ref long backoffMs, bool waitsLong = false)
         {
             backoffMs = Math.Min(300_000, Math.Max(5_000, backoffMs * 2));
             if (err.RetryAfter.HasValue) return (long)(err.RetryAfter.Value * 1000);
-            return err.Waiting ? WaitingMs : backoffMs;
+            return err.Waiting || waitsLong ? WaitingMs : backoffMs;
         }
     }
 }
