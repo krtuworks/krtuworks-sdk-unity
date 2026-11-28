@@ -197,6 +197,41 @@ namespace Krtuworks.Tests
         }
 
         [Test]
+        public async Task AnAccountMergedOrDeletedAnswerToTheCallRetriedAfterARefreshIsToldToTheIdentity_ControlA200AfterTheRefreshChangesNothing()
+        {
+            foreach (var code in new string?[] { "account_merged", "account_deleted", null })
+            {
+                var server = new FakeServer();
+                var rig = await Build(server);
+                var changes = new List<string>();
+                rig.Identity.Changed += change => changes.Add(change.Type);
+                var api = new Api(rig.Opts, rig.Identity, server, new Clock());
+                var calls = 0;
+                server.On("GET", "/v1/me/status", _ =>
+                {
+                    calls++;
+                    if (calls == 1) return new Reply { Status = 401, Json = new JObject { ["error"] = new JObject { ["code"] = "token_expired", ["message"] = "x" } } };
+                    return code == null
+                        ? new Reply { Json = new JObject { ["ok"] = true } }
+                        : new Reply { Status = 401, Json = new JObject { ["error"] = new JObject { ["code"] = code, ["message"] = "x" }, ["mergedInto"] = "pw_target_cccccccccccc" } };
+                });
+                if (code == null)
+                {
+                    var answer = await api.PlayerAsync("/v1/me/status", new PlayerCall());
+                    Assert.That(answer.Status, Is.EqualTo(200));
+                    Assert.That(rig.Identity.Player?.Subject, Is.EqualTo(A));
+                    Assert.That(changes, Is.Empty);
+                    continue;
+                }
+                var err = await AsyncAssert.ThrowsAsync<KrtuworksException>(() => api.PlayerAsync("/v1/me/status", new PlayerCall()));
+                Assert.That(err.Code, Is.EqualTo(code == "account_merged" ? "account_merged" : "account_deleted").Or.EqualTo("context_changed"));
+                Assert.That(rig.Identity.Player, Is.Null, $"{code}: the player is signed out");
+                Assert.That(changes, Is.EqualTo(code == "account_merged" ? new[] { "merged" } : new[] { "signed_out" }));
+                Assert.That(calls, Is.EqualTo(2), "refreshed once, no second retry");
+            }
+        }
+
+        [Test]
         public async Task ASessionReportsOnlyItsOwnTimeInUse_ANewOneForAnotherPlayerStartsFromZero_ControlTheFirstCountsItsTime()
         {
             var server = new FakeServer();

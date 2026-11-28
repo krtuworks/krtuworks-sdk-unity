@@ -20,7 +20,7 @@ namespace Krtuworks
         /// <summary>The rest of the server's answer (`mergedInto`, `current`, `endsAt`, `terms`, `description` …).</summary>
         public JObject Details { get; }
 
-        public KrtuworksException(string code, string message, int status = 0, double? retryAfter = null, JObject? details = null) : base(message)
+        public KrtuworksException(string code, string message, int status = 0, double? retryAfter = null, JObject? details = null, Exception? inner = null) : base(message, inner)
         {
             Code = code;
             Status = status;

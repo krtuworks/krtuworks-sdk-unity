@@ -300,7 +300,8 @@ namespace Krtuworks
 
         /// <summary>
         /// Desktop sign-in with Krtuworks ID (RFC 8252): opens the system browser on the sign-in page and waits
-        /// for it to come back to this app. A guest playing here is carried along unless `carryGuest` is false.
+        /// for it to come back to this app. A guest playing here is carried along unless `carryGuest` is false;
+        /// if the guest cannot be carried (offline, refused) nothing starts and it throws `guest_carry_failed`.
         /// </summary>
         public async Task<Player> SignInWithBrowserAsync(Action<string> openBrowser, CancellationToken cancel = default, bool carryGuest = true)
         {

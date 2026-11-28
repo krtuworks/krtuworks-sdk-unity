@@ -560,15 +560,35 @@ namespace Krtuworks.Internal
 
         /// <summary>
         /// The address to send the player to (RFC 8252: the system browser, a loopback redirect). A guest
-        /// playing here is carried along (`krtu_guest`). Starting a sign-in bumps the epoch.
+        /// playing here is carried along (`krtu_guest`). Starting a sign-in bumps the epoch. When the guest's
+        /// proof cannot be made (offline, refused) the sign-in does not start: it throws `guest_carry_failed`,
+        /// so the game can try again or sign in on purpose with `carryGuest` false.
         /// </summary>
         internal async Task<string> BeginSignInAsync(string redirectUri, bool carryGuest = true)
         {
             await SweepPendingSignInsAsync();
+            // The epoch this sign-in starts from: a sign-out or another sign-in while the guest's proof is made
+            // moves it, and then this one must not start (it would come after the later decision).
+            var seen = (await MetaAsync()).Epoch;
+            string? guestProof = null;
+            if (tokens?.Kind == "guest" && carryGuest)
+            {
+                var key = await Json.Get<DeviceKey>(secrets, Key("deviceKey"));
+                if (key != null && key.Known)
+                {
+                    try { guestProof = await ProofWith(key, "promote"); }
+                    catch (KrtuworksException err)
+                    {
+                        // Going on without the guest would leave its progress behind: the sign-in does not start.
+                        throw new KrtuworksException("guest_carry_failed", "The guest could not be carried into the sign-in (offline or refused). Try again, or sign in on purpose with carryGuest false.", inner: err);
+                    }
+                }
+            }
             long epoch;
             using (await Locks.Take(LockName))
             {
                 var meta = await MetaAsync();
+                if (meta.Epoch != seen) throw new KrtuworksException("context_changed", "The player signed out or another sign-in started meanwhile; this one was not started.");
                 meta.Epoch++;
                 await SaveMeta(meta);
                 epoch = meta.Epoch;
@@ -590,15 +610,7 @@ namespace Krtuworks.Internal
                 new KeyValuePair<string, string>("state", state),
                 new KeyValuePair<string, string>("nonce", nonce),
             };
-            if (tokens?.Kind == "guest" && carryGuest)
-            {
-                var key = await Json.Get<DeviceKey>(secrets, Key("deviceKey"));
-                if (key != null && key.Known)
-                {
-                    try { query.Add(new KeyValuePair<string, string>("krtu_guest", await ProofWith(key, "promote"))); }
-                    catch (KrtuworksException) { /* offline or refused: the sign-in goes on without the guest */ }
-                }
-            }
+            if (guestProof != null) query.Add(new KeyValuePair<string, string>("krtu_guest", guestProof));
             await Json.Put(secrets, Key($"signin:{state}"), new PendingSignIn { Verifier = verifier, Nonce = nonce, RedirectUri = redirectUri, Epoch = epoch, StartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
             return $"{opts.IdOrigin}/oidc/auth?{string.Join("&", query.Select(q => $"{Uri.EscapeDataString(q.Key)}={Uri.EscapeDataString(q.Value)}"))}";
         }

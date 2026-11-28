@@ -14,7 +14,7 @@
    - The build label is `Application.version`: give each released build its own version.
 4. Sign the player in:
    - A guest needs no screen: `await KrtuworksUnity.Client.SignInAsGuestAsync(birthDate)` once, after the game's age screen (birth date `YYYY-MM-DD`, 13 or older, with the Krtuworks ID Terms and Privacy Notice). The same device signs in again with no input.
-   - `await KrtuworksUnity.SignInAsync()` opens Krtuworks ID the platform's way (desktop: system browser and a loopback return; iOS and Android: the system's sign-in session and the app's own scheme `com.krtuworks.<slug>:/callback`). A guest who signs in keeps their progress.
+   - `await KrtuworksUnity.SignInAsync()` opens Krtuworks ID the platform's way (desktop: system browser and a loopback return; iOS and Android: the system's sign-in session and the app's own scheme `com.krtuworks.<slug>:/callback`). A guest who signs in keeps their progress. If the guest cannot be carried into the sign-in (offline, refused) it throws `KrtuworksException` `guest_carry_failed` and nothing starts: offer a retry, or sign in on purpose with `carryGuest: false` (`SignInWithBrowserAsync` / `SignInWithAppAsync`), which leaves the guest's progress behind.
    - Consoles: `StartDeviceLinkAsync()`, show its `UserCode` and `VerificationUri`, then `FinishDeviceLinkAsync(link)`.
    - WebGL has no sign-in screen in Unity: use the JavaScript package on the page. Guests work.
 5. For Steam: add Steamworks.NET (the UPM package switches the adapter on by itself; with a `.unitypackage` add the scripting define `KRTU_STEAMWORKS`), start Steam and call `SteamAPI.RunCallbacks()` every frame as usual, and pass the adapter:

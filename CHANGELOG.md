@@ -4,6 +4,12 @@ All notable changes to `com.krtuworks.sdk`. Versions follow semantic versioning;
 
 ## Unreleased
 
+## 1.0.18 - 2026-11-28
+
+### Fixed
+- Starting a sign-in for a playing guest whose proof cannot be made (offline, refused) now throws `guest_carry_failed` and starts nothing. Before, it went on without the guest and the guest's progress could be left behind. Retry, or sign in on purpose with `carryGuest: false`. A sign-out or another sign-in made while the proof is awaited wins: this sign-in then fails with `context_changed`.
+- A 401 `account_merged` or `account_deleted` that answers the call retried after a token refresh now marks the identity, as the first answer does. Before, only the first answer was read.
+
 ## 1.0.17 - 2026-11-27
 
 ### Fixed

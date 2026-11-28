@@ -29,6 +29,9 @@ namespace Krtuworks.Internal
     /// <summary>The player's calls to the server (`/v1`, Bearer + X-Krtu-Build). Same rules as krtuworks-sdk-js/src/api.ts.</summary>
     internal sealed class Api
     {
+        /// <summary>401 codes that a forced token refresh can cure.</summary>
+        static readonly HashSet<string> Refreshable = new HashSet<string> { "token_expired", "token_revoked", "invalid_token" };
+
         readonly Resolved opts;
         readonly Identity identity;
         readonly IHttpTransport http;
@@ -65,7 +68,7 @@ namespace Krtuworks.Internal
         /// A player's call, for `call.Owner` (or whoever plays now). Every attempt sends only with a token of that
         /// player: when the token in hand is another one's (the player changed while it was fetched, or before
         /// the retry after a 401), nothing is sent (`context_changed`). An expired or revoked token is refreshed
-        /// once and the call made again; a merged account is reported to the identity; an answer that arrives
+        /// once and the call made again; a merged or deleted account is reported to the identity, from the retried answer too; an answer that arrives
         /// after the player changed is dropped too, so it can never land in another player's state.
         /// </summary>
         internal async Task<Answer> PlayerAsync(string path, PlayerCall call)
@@ -73,16 +76,11 @@ namespace Krtuworks.Internal
             var generation = identity.Generation;
             var owner = call.Owner ?? identity.Player?.Subject ?? throw new KrtuworksException("signed_out", "No player is signed in.");
             var answer = await Attempt(path, call, false, owner);
-            if (answer.Status == 401)
+            await ReportAccountEndAsync(answer, owner);
+            if (answer.Status == 401 && Refreshable.Contains(Wire.ErrorOf(answer).Code))
             {
-                var err = Wire.ErrorOf(answer);
-                if (err.Code == "account_merged") await identity.MarkMergedAsync(owner, (string?)err.Details["mergedInto"]);
-                if (err.Code == "account_deleted")
-                {
-                    await identity.MarkDeletedAsync(owner);
-                    throw err;
-                }
-                if (err.Code == "token_expired" || err.Code == "token_revoked" || err.Code == "invalid_token") answer = await Attempt(path, call, true, owner);
+                answer = await Attempt(path, call, true, owner);
+                await ReportAccountEndAsync(answer, owner);
             }
             if (identity.Generation != generation) throw new KrtuworksException("context_changed", "The player changed while the call ran; it was dropped.");
             if ((answer.Status >= 300 || answer.Status < 200) && !Accepted(call, answer.Status))
@@ -93,6 +91,19 @@ namespace Krtuworks.Internal
             }
             identity.NoteMerging(owner, false);
             return answer;
+        }
+
+        /// <summary>A 401 that names a merged or deleted account is told to the identity (a deleted one also ends the call), for the first answer and the one after the refresh alike.</summary>
+        async Task ReportAccountEndAsync(Answer answer, string owner)
+        {
+            if (answer.Status != 401) return;
+            var err = Wire.ErrorOf(answer);
+            if (err.Code == "account_merged") await identity.MarkMergedAsync(owner, (string?)err.Details["mergedInto"]);
+            if (err.Code == "account_deleted")
+            {
+                await identity.MarkDeletedAsync(owner);
+                throw err;
+            }
         }
 
         async Task<Answer> Attempt(string path, PlayerCall call, bool forceRefresh, string owner)

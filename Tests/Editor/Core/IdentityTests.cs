@@ -189,6 +189,50 @@ namespace Krtuworks.Tests
         }
 
         [Test]
+        public async Task ASignOutWhileTheGuestProofIsAwaitedWins_TheSlowSignInDoesNotStart_ControlWithoutItItStarts()
+        {
+            var server = new FakeServer();
+            server.GuestRoutes();
+            var (identity, store, _) = IdentityOn(server);
+            await identity.SignInAsGuestAsync("2000-01-01", Terms, false);
+            var gate = new TaskCompletionSource<bool>();
+            server.OnAsync("POST", "/oidc/device-key/challenge", async _ =>
+            {
+                await gate.Task;
+                return FakeServer.Ok(new JObject { ["nonce"] = new string('n', 43), ["expires_in"] = 60 });
+            });
+            var slow = identity.BeginSignInAsync("http://127.0.0.1:5555/callback");
+            await Task.Delay(20);
+            await identity.SignOutAsync();
+            var afterSignOut = (await identity.MetaAsync()).Epoch;
+            gate.SetResult(true);
+            await Throws(() => slow, "context_changed");
+            Assert.That((await identity.MetaAsync()).Epoch, Is.EqualTo(afterSignOut), "the sign-out stays the latest decision");
+            Assert.That(await store.KeysAsync("krtu:buried.test.native:signin:"), Is.Empty, "no pending sign-in was kept");
+            await identity.SignInAsGuestAsync("2000-01-01", Terms, false);
+            var url = new Uri(await identity.BeginSignInAsync("http://127.0.0.1:5555/callback"));
+            Assert.That(url.Query, Does.Contain("krtu_guest"), "control: with no change meanwhile the sign-in starts and carries the guest");
+        }
+
+        [Test]
+        public async Task AGuestThatCannotBeCarriedStopsTheSignIn_NothingIsStored_ControlCarryGuestFalseGoesOnWithoutTheGuest()
+        {
+            var server = new FakeServer();
+            server.GuestRoutes();
+            var (identity, store, _) = IdentityOn(server);
+            await identity.SignInAsGuestAsync("2000-01-01", Terms, false);
+            var epoch = (await identity.MetaAsync()).Epoch;
+            server.Offline.Add("/oidc/device-key/challenge");
+            var err = await Throws(() => identity.BeginSignInAsync("http://127.0.0.1:5555/callback"), "guest_carry_failed");
+            Assert.That(err.InnerException, Is.InstanceOf<KrtuworksException>());
+            Assert.That((await identity.MetaAsync()).Epoch, Is.EqualTo(epoch), "the epoch did not move");
+            Assert.That(await store.KeysAsync("krtu:buried.test.native:signin:"), Is.Empty, "no pending sign-in was kept");
+            var url = new Uri(await identity.BeginSignInAsync("http://127.0.0.1:5555/callback", false));
+            Assert.That(url.Query, Does.Not.Contain("krtu_guest"));
+            Assert.That(await store.KeysAsync("krtu:buried.test.native:signin:"), Has.Count.EqualTo(1));
+        }
+
+        [Test]
         public async Task SignInAddressCarriesPkceConsentResourceAndTheGuest_CallbackChecksStateAndNonceOnce()
         {
             var server = new FakeServer();
